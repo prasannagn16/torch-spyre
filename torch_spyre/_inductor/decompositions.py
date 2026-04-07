@@ -365,26 +365,6 @@ def full_decomp(
     return torch.ops.spyre.full(size, fill_value, device, dtype=dtype)
 
 
-@register_spyre_decomposition([torch.ops.aten.gt.Tensor, torch.ops.aten.gt.Tensor_out])
-def gt_decomp(
-    input: torch.Tensor, other: torch.Tensor, *, out: Optional[torch.Tensor] = None
-) -> torch.Tensor:
-    # TODO: Implement greaterthan in the backend compiler
-    out_ge = torch.ge(input, other).to(dtype=torch.float16)
-    out_ne = torch.ne(input, other).to(dtype=torch.float16)
-    return torch.mul(out_ge, out_ne, out=out).to(dtype=torch.bool)
-
-
-@register_spyre_decomposition([torch.ops.aten.lt.Tensor, torch.ops.aten.lt.Tensor_out])
-def lt_decomp(
-    input: torch.Tensor, other: torch.Tensor, *, out: Optional[torch.Tensor] = None
-) -> torch.Tensor:
-    # TODO: Implement lessthan in the backend compiler
-    out_le = torch.le(input, other).to(dtype=torch.float16)
-    out_ne = torch.ne(input, other).to(dtype=torch.float16)
-    return torch.mul(out_le, out_ne, out=out).to(dtype=torch.bool)
-
-
 @register_spyre_decomposition([torch.ops.aten.logical_not])
 def logical_not_decomp(input: torch.Tensor) -> torch.Tensor:
     # Currently falling back to torch.zeros_like for dtypes other than bool
@@ -453,12 +433,9 @@ def spyre_rms_norm(
             f"got device={input.device.type}, normalized_shape={normalized_shape}"
         )
 
-    eps_tensor = torch.ops.spyre.full(
-        input.shape, eps, dtype=torch.float16, device="spyre"
-    )
-    rsqrt_inp = (
-        torch.rsqrt(torch.mean(input * input, dim=-1, keepdim=True)) + eps_tensor
-    )
+    mean = torch.mean(input * input, dim=-1, keepdim=True)
+    eps_tensor = torch.ops.spyre.full((1,), eps, dtype=torch.float16, device="spyre")
+    rsqrt_inp = torch.rsqrt(mean + eps_tensor)
     output = input * rsqrt_inp
     if weight is not None:
         output = output * weight
@@ -549,10 +526,11 @@ def spyre__sdpa_overrideable(
     scaling_factor = math.sqrt(scaling_factor)
 
     # TODO (aviros): Figure why this broadcast doesn't work
-    scaling_factor = torch.full_like(query, scaling_factor)
+    scaling_factor_q = torch.full_like(query, scaling_factor)
+    scaling_factor_k = torch.full_like(key, scaling_factor)
 
-    query = query * scaling_factor
-    key = key * scaling_factor
+    query = query * scaling_factor_q
+    key = key * scaling_factor_k
 
     key_t = key.transpose(-2, -1).clone(memory_format=torch.contiguous_format)
 
