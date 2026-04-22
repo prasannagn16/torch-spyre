@@ -47,12 +47,16 @@
 import functools
 import os
 import warnings
+import logging
 
 import torch
 
 aten = torch._ops.ops.aten
 
 fallback_ops = list()
+
+logger = logging.getLogger(__name__)
+_SPYRE_FALLBACK_WARN = int(os.environ.get("TORCH_SPYRE_FALLBACK_WARN", "1"))
 
 
 class FallbackWarning(UserWarning):
@@ -277,3 +281,189 @@ def spyre__triu(input, diagonal=0, **kwargs):
 @register_fallback([aten.slice.Tensor])
 def spyre__slice(self, dim=0, start=None, end=None, step=1):
     return torch.ops.aten.slice(self, dim, start, end, step)
+
+
+#-------------------####################--------------------------------#
+# -------------------------------------------------------------------
+# Shared CPU fallback — preserves source device on output
+# -------------------------------------------------------------------
+
+def cpu_fallback(op, *args, **kwargs):
+    """
+    Move tensors to CPU, execute op, return outputs to originating device.
+    Logs a warning when TORCH_SPYRE_FALLBACK_WARN=1 (default).
+    """
+    # STEP 1: Remember where tensors came from
+    source_device = next(
+        (a.device for a in args if isinstance(a, torch.Tensor)), 
+        torch.device("cpu")
+    )
+    # Example: source_device = "spyre:0"
+    
+    # STEP 2: Move all tensors to CPU
+    def to_cpu(x):
+        return x.to("cpu") if isinstance(x, torch.Tensor) else x
+    
+    cpu_args = [to_cpu(a) for a in args]
+    cpu_kwargs = {k: to_cpu(v) for k, v in kwargs.items()}
+    # Example: tensor on spyre:0 → tensor on cpu
+    
+    # STEP 3: Log warning (if enabled)
+    if _SPYRE_FALLBACK_WARN and source_device.type == "spyre":
+        logger.warning("CPU fallback triggered for op=%s", op)
+    
+    # STEP 4: Execute operation on CPU
+    out = op(*cpu_args, **cpu_kwargs)
+    # Example: torch.ops.aten.reshape(cpu_tensor, shape)
+    
+    # STEP 5: Move result back to original device
+    def restore(x):
+        return x.to(source_device) if isinstance(x, torch.Tensor) else x
+    
+    if isinstance(out, (tuple, list)):
+        return type(out)(restore(o) for o in out)
+    return restore(out)
+    # Example: cpu_tensor → spyre:0 tensor
+
+
+# -------------------------------------------------------------------
+# aten.reshape
+# -------------------------------------------------------------------
+
+def is_supported_reshape(x, shape):
+    """Returns True only if Spyre can safely handle this reshape."""
+      # Check 1: Handle -1 in shape (inferred dimension)
+    shape = list(shape)
+    inferred = [s for s in shape if s == -1]
+    
+    if len(inferred) > 1:
+        return False  # Multiple -1 is invalid
+    
+    # Check 2: Verify numel matches
+    known_prod = 1
+    for s in shape:
+        if s != -1:
+            known_prod *= int(s)
+    
+    if len(inferred) == 1:
+        # With -1: numel must be divisible by known dimensions
+        if known_prod == 0 or x.numel() % known_prod != 0:
+            return False
+    else:
+        # Without -1: numel must match exactly
+        if x.numel() != known_prod:
+            return False
+    
+    # Check 3: Must be contiguous
+    if not x.is_contiguous():
+        return False
+    
+    return True  # All checks passed → Spyre can handle it
+
+@register_fallback([aten.reshape.default])
+def spyre__reshape(self, shape):
+# DECISION POINT: Can Spyre handle this?
+    if is_supported_reshape(self, shape):
+        # YES → Try Spyre
+        try:
+            import pdb; pdb.set_trace("hiting  spyre")
+            return torch.ops.aten.reshape(self, shape) 
+        except Exception as e:
+            # Spyre failed at runtime → fall through to CPU
+            logger.debug("spyre__reshape native failed, using CPU fallback")
+    
+    import pdb; pdb.set_trace("hiting  cpu")
+    
+    # NO (or Spyre failed) → Use CPU
+    return cpu_fallback(torch.ops.aten.reshape, self, shape) 
+
+
+# -------------------------------------------------------------------
+# aten.linear
+# -------------------------------------------------------------------
+
+def is_supported_linear(input, weight, bias):
+    """Returns True only if all conditions for Spyre linear are met."""
+
+    if not isinstance(input, torch.Tensor) or not isinstance(weight, torch.Tensor):
+        return False
+
+    if weight.dim() < 2:
+        return False
+
+    # int64 not supported on Spyre
+    if input.dtype == torch.int64 or weight.dtype == torch.int64:
+        return False
+
+    # dtype must match between input and weight
+    if input.dtype != weight.dtype:
+        return False
+
+    if bias is not None:
+        if not isinstance(bias, torch.Tensor):
+            return False
+        if bias.dtype != input.dtype:
+            return False
+
+    # linear: (..., in_features) @ (out_features, in_features).T
+    if input.size(-1) != weight.size(-1):
+        return False
+
+    # empty tensors not supported
+    if input.numel() == 0 or weight.numel() == 0:
+        return False
+
+    # non-contiguous layouts not supported (includes channels_last implicitly)
+    if not input.is_contiguous() or not weight.is_contiguous():
+        return False
+
+    return True
+
+
+@register_fallback([aten.linear.default])
+def spyre__linear(input, weight, bias=None):
+    if is_supported_linear(input, weight, bias):
+        try:
+            return torch.ops.aten.linear.default(input, weight, bias)
+        except Exception as e:
+            logger.debug("spyre__linear native failed (%s), using CPU fallback", e)
+
+    return cpu_fallback(torch.nn.functional.linear, input, weight, bias)
+
+
+# -------------------------------------------------------------------
+# aten.clone
+# -------------------------------------------------------------------
+
+def is_supported_clone(x, memory_format=torch.preserve_format):
+    """Returns True only if Spyre can safely handle this clone."""
+
+    if not isinstance(x, torch.Tensor):
+        return False
+
+    # Expanded (stride-0) tensors not supported
+    if any(s == 0 for s in x.stride()):
+        return False
+
+    if not x.is_contiguous():
+        return False
+
+    if x.numel() == 0:
+        return False
+
+    # Non-default memory formats may not be supported
+    if memory_format not in (torch.preserve_format, torch.contiguous_format):
+        return False
+
+    return True
+
+
+@register_fallback([aten.clone.default])
+def spyre__clone(x, memory_format=torch.preserve_format):
+    if is_supported_clone(x, memory_format):
+        try:
+            return torch.ops.aten.clone.default(x, memory_format=memory_format)
+        except Exception as e:
+            logger.debug("spyre__clone native failed (%s), using CPU fallback", e)
+
+    return cpu_fallback(torch.ops.aten.clone.default, x, memory_format=memory_format)
