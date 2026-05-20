@@ -157,6 +157,9 @@ class SpyreOpFuncs:
 
     @staticmethod
     def eq(a, b):
+        if isinstance(b, Constant):
+            op_info = {"constants": {"scalar": b.value}}
+            return PointwiseOp("equal", [a], op_info)
         return PointwiseOp("equal", [a, b])
 
     @staticmethod
