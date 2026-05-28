@@ -106,7 +106,9 @@ register_torch_compile_kernel(
         aten.sub,
         aten.addmm,
         aten.eq,
-        aten.ne,
+        aten.le,
+        aten.ne.Tensor,
+        aten.ne.Tensor_out,
         aten.ge,
         aten.gt,
         aten.lt,
@@ -115,6 +117,7 @@ register_torch_compile_kernel(
         aten.pow,
         aten.linalg_vector_norm,
         aten.clamp,
+        aten.constant_pad_nd,
     ]
 )
 
