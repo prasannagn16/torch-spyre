@@ -17,7 +17,12 @@ import math
 from abc import ABC, abstractmethod
 from typing import Any, Optional
 
-from torch._inductor.ir import ComputedBuffer, Operation, MutationLayoutSHOULDREMOVE
+from torch._inductor.ir import (
+    ComputedBuffer,
+    Operation,
+    MutationLayoutSHOULDREMOVE,
+    Reduction,
+)
 from torch._inductor.graph import GraphLowering
 
 from torch_spyre._inductor.pass_utils import (
@@ -30,6 +35,10 @@ from torch_spyre._inductor.scratchpad.plan_solver import (
     GreedyLayoutSolver,
     LifetimeBoundBuffer,
     MemoryPlanSolver,
+)
+from torch_spyre._inductor.scratchpad.firstfit_bestfit_solver import (
+    BestFitLayoutSolver,
+    FirstFitLayoutSolver,
 )
 from torch_spyre._inductor.scratchpad.passes import (
     CloneInputNodesPass,
@@ -199,7 +208,16 @@ class DefaultAllocator(ScratchpadAllocator):
         """
         size = int((2 << 20) * (1.0 - config.dxp_lx_frac_avail))
         if layout_planning is None:
-            layout_planning = GreedyLayoutSolver(size)
+            if config.layout_solver == "greedy":
+                layout_planning = GreedyLayoutSolver(size)
+            elif config.layout_solver == "bestfit":
+                layout_planning = BestFitLayoutSolver(size)
+            elif config.layout_solver == "firstfit":
+                layout_planning = FirstFitLayoutSolver(size)
+            else:
+                raise ValueError(
+                    f"Invalid layout_solver config option '{config.layout_solver}'."
+                )
         if pre_optimization_passes is None:
             pre_optimization_passes = [CloneInputNodesPass(size)]
         if post_optimization_passes is None:
@@ -239,6 +257,10 @@ def _enum_split_options(op: Operation) -> list[tuple[dict, dict]]:
     if not output_splits or not isinstance(op, ComputedBuffer):
         return [seed]
 
+    # Reduction ops: don't flip for now.
+    if isinstance(op.data, Reduction):
+        return [seed]
+
     # Recover seed's per-symbol form to mutate the slicing.
     rw = op.get_read_writes()
     write_index = next(iter(rw.writes)).index
@@ -249,9 +271,8 @@ def _enum_split_options(op: Operation) -> list[tuple[dict, dict]]:
         seed, write_index, read_index, iter_space
     )
 
-    # v1: only single output-dim splits are flipped. Reduction-axis
-    # splits are skipped (flipping would change has_partial_reduction);
-    # multi-dim splits (e.g. k_fast (1, n, k)) aren't yet handled.
+    # Only single output-dim splits are flipped. Multi-dim splits (e.g.
+    # k_fast (1, n, k)) aren't yet handled.
     sliced_output_syms = [
         s for s in seed_per_sym if seed_per_sym[s] > 1 and write_index.coeff(s) != 0
     ]
@@ -311,6 +332,12 @@ class StrategyBCoOptimizingAllocator(DefaultAllocator):
             chosen = options[opt_idx]
             if chosen != getattr(op, "op_it_space_splits", ({}, {})):
                 op.op_it_space_splits = chosen
+
+        # try insert clone again, as what was incompatible could be compatible now
+        # TODO simplify the previous pre-opt (at the beginning of this func), we will
+        # run check core-div-mismatch a few times due to clone-insertion, speed-up?
+        for p in self.pre_optimization_passes:
+            p.apply_pass(graph)
 
         # Standard downstream flow on the now-fixed winning splits. Mirrors
         # DefaultAllocator.plan_allocation past the pre-passes.

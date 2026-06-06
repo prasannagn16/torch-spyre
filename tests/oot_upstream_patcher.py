@@ -23,8 +23,10 @@ would not affect these copies.
 
 from typing import Set, Optional
 import torch
+import regex as re
+import pytest  # type: ignore
 
-from oot_test_utilities import _get_privateuse1_device_type
+from oot_test_utilities import _OOT_PLATFORM_ARCH, _get_privateuse1_device_type
 
 # Resolve the registered backend name once at import time.
 # Used in _OOTModuleListPatcher to strip the device suffix when extracting
@@ -60,6 +62,45 @@ def _extract_base_module_name(name: str) -> str:
         ):
             return base_name
     return name
+
+
+class _OOTNativeDeviceTypesPatcher:
+    """Patches NATIVE_DEVICES in common_device_type to include 'privateuse1'.
+
+    @onlyNativeDeviceTypes and @onlyNativeDeviceTypesAnd both check
+    self.device_type against the module-level NATIVE_DEVICES tuple at call
+    time:
+
+        if self.device_type not in NATIVE_DEVICES: raise SkipTest
+
+    Unlike @onlyOn, there is no decorator instance to mutate -- the check is
+    a plain name lookup against a module global. So we patch the module
+    global directly.
+
+    NATIVE_DEVICES already includes torch._C._get_privateuse1_backend_name()
+    but TorchTestBase.device_type is reset to the literal string "privateuse1"
+    in setUpClass when PYTORCH_TESTING_DEVICE_ONLY_FOR=privateuse1 is set.
+    That means the runtime check sees "privateuse1" and misses the registered
+     name entry.
+
+    Injecting "privateuse1" into NATIVE_DEVICES (once, at module level) fixes
+    both decorators simultaneously for the lifetime of the process.
+
+    This patcher is intentionally stateless after patch() runs calling it
+    multiple times is safe because we check membership before appending.
+    """
+
+    @staticmethod
+    def patch() -> None:
+        """Append 'privateuse1' to NATIVE_DEVICES if not already present.
+
+        NATIVE_DEVICES is a tuple, so we reassign the module attribute with a
+        new tuple rather than mutating in-place.
+        """
+        import torch.testing._internal.common_device_type as _cdt
+
+        if "privateuse1" not in _cdt.NATIVE_DEVICES:
+            _cdt.NATIVE_DEVICES = _cdt.NATIVE_DEVICES + ("privateuse1",)
 
 
 class _OOTOnlyOnPatcher:
@@ -549,6 +590,40 @@ class _OOTPrecisionOverridePatcher:
                 self._underlying_fn.precision_overrides[dtype] = atol
 
 
+class _OOTPlatformMarkerPatcher:
+    """Attaches a pytest marker ``platform__<arch>`` to every test variant.
+
+    Unlike op/dtype/module patchers, the platform tag is the same for every
+    variant in a parametrised test, so we patch the underlying function
+    directly rather than wrapping ``parametrize_fn``.
+
+    The marker is applied BEFORE ``super().instantiate_test()`` so that
+    ``instantiate_test`` copies it onto every generated method via
+    ``@wraps`` / ``pytestmark`` propagation.
+
+    Architecture strings are normalised: non-alphanumeric characters are
+    replaced with ``_`` so the marker is always a valid Python identifier.
+    Examples:
+        x86_64  --> platform__x86_64
+        ppc64le --> platform__ppc64le
+        aarch64 --> platform__aarch64
+    """
+
+    def __init__(self, test: object) -> None:
+        self._underlying_fn = (
+            test.__func__ if hasattr(test, "__func__") else test  # type: ignore[union-attr]
+        )
+
+    def patch(self) -> None:
+        mark = pytest.mark.__getattr__(f"platform__{_OOT_PLATFORM_ARCH}")
+
+        # Attach to pytestmark list so @wraps-based propagation carries it
+        # through every decorator layer that instantiate_test applies later.
+        if not hasattr(self._underlying_fn, "pytestmark"):
+            self._underlying_fn.pytestmark = []
+        self._underlying_fn.pytestmark = list(self._underlying_fn.pytestmark) + [mark]
+
+
 class _OOTOpMarkerPatcher:
     """Patches @ops._parametrize_test to attach pytest markers directly on
     each test_wrapper as it is yielded, before super().instantiate_test()
@@ -575,7 +650,6 @@ class _OOTOpMarkerPatcher:
             return
 
         import pytest
-        import regex as re
 
         original_parametrize_fn = self._underlying_fn.parametrize_fn
 
@@ -643,7 +717,6 @@ class _OOTModuleMarkerPatcher:
             return
 
         import pytest
-        import regex as re
 
         original_parametrize_fn = self._underlying_fn.parametrize_fn
 
