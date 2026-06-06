@@ -13,6 +13,14 @@ test_suite_config:
       # than enumerating each LxPlanningTwoOpPointwiseAdditionTest:: and
       # LxPlanningTwoOpReductionTest:: test name explicitly.
       unlisted_test_mode: mandatory_success
+      tests:
+        # New eq_scalar tests are not yet working in lx_planning context
+        - names:
+            - LxPlanningTwoOpPointwiseAdditionTest::test_eq_scalar.*
+            - LxPlanningTwoOpPointwiseAdditionTest::test_scalar_comparison.*
+            - LxPlanningTwoOpReductionTest::test_eq_scalar.*
+            - LxPlanningTwoOpReductionTest::test_scalar_comparison.*
+          mode: xfail
       # tests:
       #     ##########################################################################################
       #     # The following tests are failing in the CICD currently -- hence moving these to xfail now

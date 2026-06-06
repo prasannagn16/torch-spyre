@@ -3702,7 +3702,8 @@ class TestOps(unittest.TestCase, metaclass=ParameterizedTestMeta):
                 "mixed": (
                     torch.tensor([1.0, 5.0, 3.0, 5.0], dtype=torch.float16),
                     torch.tensor([1.0, 2.0, 3.0, 4.0], dtype=torch.float16),
-                    5,),
+                    5,
+                ),
             },
         },
         ("test_where_default", "test_where_eager_default_fallback"): {
@@ -3976,7 +3977,7 @@ class TestOps(unittest.TestCase, metaclass=ParameterizedTestMeta):
 
         _compare_op_with_cpu(fn, None, x, y, scalar)
 
-    def test_scalar_comparison_simple1(self):
+    def test_scalar_comparison(self):
         self.test_eq_scalar_int_42()
 
     def test_eq_scalar_constant_int(self):

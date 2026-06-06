@@ -4,10 +4,9 @@ test_suite_config:
       unlisted_test_mode: skip
       tests:
         - names:
-            # k_expr: test_pointwise or test_sqrt or test_rsqrt or test_log_
-            #         or test_alias_operands or test_cmp or test_logical_not or test_bool
-            #
             - TestOps::test_(pointwise|sqrt|rsqrt|log_|alias_operands|cmp|logical_not|bool).*
+            - TestOps::test_scalar.*
+            - TestOps::test_eq_scalar.*
           mode: mandatory_success
           tags:
             - ops__inductor-pointwise
