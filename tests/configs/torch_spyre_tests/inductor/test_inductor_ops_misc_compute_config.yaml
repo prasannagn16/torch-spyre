@@ -28,6 +28,7 @@ test_suite_config:
             - TestOps::test_sub_scalar.*
             - TestOps::test_scalar_cpu.*
             - TestOps::test_eq_scalar.*
+            - TestOps::test_scalar_comparison.*
             # attention / sdpa / rope / qkv
             - TestOps::test_attention.*
             - TestOps::test_sdpa.*
