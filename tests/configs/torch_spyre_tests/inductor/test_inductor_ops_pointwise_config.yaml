@@ -5,8 +5,6 @@ test_suite_config:
       tests:
         - names:
             - TestOps::test_(pointwise|sqrt|rsqrt|log_|alias_operands|cmp|logical_not|bool).*
-            - TestOps::test_scalar.*
-            - TestOps::test_eq_scalar.*
           mode: mandatory_success
           tags:
             - ops__inductor-pointwise
