@@ -3670,13 +3670,13 @@ class TestOps(unittest.TestCase, metaclass=ParameterizedTestMeta):
                     10,
                     torch.tensor([1.0, 10.0, 5.0, 10.0, 3.0], dtype=torch.float16),
                 ),
-                "float_3_14": (
-                    3.14,
-                    torch.tensor([1.0, 3.14, 2.5, 3.14, 5.0], dtype=torch.float16),
+                "float_3_5": (
+                    3.5,
+                    torch.tensor([1.0, 3.5, 2.5, 3.1, 5.0], dtype=torch.float16),
                 ),
                 "negative_5": (
                     -5,
-                    torch.tensor([-5.0, 0.0, 5.0, -5.0, 10.0], dtype=torch.float16),
+                    torch.tensor([-5, 0.0, 5.0, -5.0, 10.0], dtype=torch.float16),
                 ),
                 "zero": (
                     0,
@@ -3984,7 +3984,7 @@ class TestOps(unittest.TestCase, metaclass=ParameterizedTestMeta):
         self.test_eq_scalar_int_10()
 
     def test_eq_scalar_constant_float(self):
-        self.test_eq_scalar_float_3_14()
+        self.test_eq_scalar_float_3_5()
 
     def test_eq_scalar_constant_negative(self):
         self.test_eq_scalar_negative_5()
