@@ -164,6 +164,8 @@ class SpyreOpFuncs:
 
     @staticmethod
     def eq(a, b):
+        if isinstance(b, Constant):
+            return PointwiseOp("equal", [a], {"constants": {"value": b.value}})
         return PointwiseOp("equal", [a, b])
 
     @staticmethod
