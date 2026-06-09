@@ -14,11 +14,13 @@ import torch
 from pydantic import BaseModel, field_validator, model_validator  # type: ignore
 
 from oot_test_constants import (
+    _VALID_DTYPE_STRINGS,
+    _VALID_INIT_STRATEGIES,
+    _VALID_TEST_MODES,
+    _VALID_UNLISTED_MODES,
     DTYPE_STR_MAP,
     MODE_MANDATORY_SUCCESS,
-    MODE_SKIP,
     MODE_XFAIL,
-    MODE_XFAIL_STRICT,
     REL_PATH_TOKENS,
 )
 from oot_test_matching import parse_dtype
@@ -28,48 +30,6 @@ from oot_test_utilities import (
     _resolve_tensor_path,
 )
 
-
-# ---------------------------------------------------------------------------
-# Valid dtype strings (used in validators)
-# ---------------------------------------------------------------------------
-
-_VALID_DTYPE_STRINGS = {
-    "float16",
-    "float32",
-    "float64",
-    "bfloat16",
-    "int8",
-    "int16",
-    "int32",
-    "int64",
-    "uint8",
-    "uint16",
-    "uint32",
-    "uint64",
-    "complex32",
-    "complex64",
-    "complex128",
-    "bool",
-    "half",
-}
-# -------------------------------------------
-# Valid tensor generation strategies
-# -------------------------------------------
-_VALID_INIT_STRATEGIES = {
-    "rand",
-    "randn",
-    "zeros",
-    "ones",
-    "randint",
-    "arange",
-    "eye",
-    "full",
-    "file",
-}
-
-_VALID_TEST_MODES = {MODE_MANDATORY_SUCCESS, MODE_XFAIL, MODE_XFAIL_STRICT, MODE_SKIP}
-
-_VALID_UNLISTED_MODES = {"skip", "xfail", "xfail_strict", "mandatory_success"}
 
 # ---------------------------
 # edits.inputs models
@@ -720,10 +680,33 @@ class DtypesEdits(BaseModel):
         }
 
 
+class FunctionItem(BaseModel):
+    """A single function entry for function modification."""
+
+    name: str  # Method name (e.g., "assertEqual")
+    description: Optional[str] = None  # Optional description
+
+
+class FunctionsEdits(BaseModel):
+    """Per-test function modification configuration.
+
+    Container for all function-level modifications. cpu_move is a list of
+    function names that will have their tensor arguments moved to CPU.
+    Extensible for future functionality.
+    """
+
+    cpu_move: List[FunctionItem] = []
+
+    def resolved_cpu_move_functions(self) -> List[str]:
+        """Return list of function names to patch with CPU move."""
+        return [item.name for item in self.cpu_move]
+
+
 class TestEdits(BaseModel):
     ops: OpsEdits = OpsEdits()
     dtypes: DtypesEdits = DtypesEdits()
     modules: ModulesEdits = ModulesEdits()
+    functions: FunctionsEdits = FunctionsEdits()
 
 
 class TestEntry(BaseModel):

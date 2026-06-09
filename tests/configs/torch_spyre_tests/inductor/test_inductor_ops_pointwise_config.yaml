@@ -4,7 +4,14 @@ test_suite_config:
       unlisted_test_mode: skip
       tests:
         - names:
-            - TestOps::test_(pointwise|sqrt|rsqrt|log_|alias_operands|cmp|logical_not|bool).*
+            - TestOps::test_(pointwise|sqrt|rsqrt|log_|alias_operands|cmp|logical_not|bool|eq_scalar|scalar_(comparison|multidim|vs_tensor)_base|scalar_comparison_simple1|eq_scalar_constant_int).*
           mode: mandatory_success
+        - names:
+            # Wrapper methods that have broken implementation (call methods without _spyre suffix)
+            - TestOps::test_scalar_comparison
+            - TestOps::test_eq_scalar_constant.*
+            - TestOps::test_eq_scalar_multidim
+            - TestOps::test_eq_scalar_vs_tensor_comparison
+          mode: skip
           tags:
             - ops__inductor-pointwise

@@ -27,9 +27,6 @@ test_suite_config:
             - TestOps::test_sub_broadcast.*
             - TestOps::test_sub_scalar.*
             - TestOps::test_scalar_cpu.*
-            - TestOps::test_scalar_comparison
-            - TestOps::test_eq_scalar_constant.*
-            - TestOps::test_eq_scalar_vs_tensor_comparison
             # attention / sdpa / rope / qkv
             - TestOps::test_attention.*
             - TestOps::test_sdpa.*
