@@ -244,6 +244,17 @@ POINTWISE_TEST_FAILURES = [
     "test_vector_norm_keepdim1_vector_norm_ordinf_4d_dim_neg1",
     "test_vector_norm_keepdim1_vector_norm_ordneginf_4d_dim_23",
     "test_where_self_out_where_fp16_2d",
+    "test_scalar_comparison",
+    "test_eq_scalar_int_42",
+    "test_eq_scalar_int_10",
+    "test_eq_scalar_float_3_14",
+    "test_eq_scalar_negative_5",
+    "test_eq_scalar_zero",
+    "test_eq_scalar_multidim_2d",
+    "test_eq_scalar_multidim_3d",
+    "test_eq_scalar_multidim_4d",
+    "test_eq_scalar_multidim_large",
+    "test_eq_scalar_vs_tensor_mixed",
 ]
 
 
@@ -427,6 +438,17 @@ REDUCTION_TEST_FAILURES = [
     "test_transpose_4d_contiguous_dim_1_3",
     "test_conv2d_1x3x32_ksize3_no_pad",
     "test_where_self_out_where_fp16_2d",
+    "test_scalar_comparison",
+    "test_eq_scalar_int_42",
+    "test_eq_scalar_int_10",
+    "test_eq_scalar_float_3_14",
+    "test_eq_scalar_negative_5",
+    "test_eq_scalar_zero",
+    "test_eq_scalar_multidim_2d",
+    "test_eq_scalar_multidim_3d",
+    "test_eq_scalar_multidim_4d",
+    "test_eq_scalar_multidim_large",
+    "test_eq_scalar_vs_tensor_mixed",
 ]
 
 

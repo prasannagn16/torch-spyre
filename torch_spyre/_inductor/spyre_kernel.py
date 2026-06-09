@@ -167,7 +167,7 @@ class SpyreOpFuncs:
         if isinstance(b, Constant):
             return PointwiseOp("equal", [a], {"constants": {"value": b.value}})
         return PointwiseOp("equal", [a, b])
-
+        
     @staticmethod
     def exp(x):
         return PointwiseOp("exp", [x])
