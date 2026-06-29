@@ -402,51 +402,7 @@ def main() -> None:
         sys.exit(1)
 
     with open(json_path) as fh:
-        raw = json.load(fh)
-
-    # Accept two formats:
-    #   (A) flat array  – produced by parse_model_ops_logs.py --ingest-json
-    #   (B) dashboard envelope – {"total_models": N, "models": [...]}
-    #       produced by parse_model_ops_logs.py --out  (legacy / CI path)
-    if isinstance(raw, dict) and "models" in raw:
-        # Dashboard envelope: models lack suite_name / run_id / suite_outcome.
-        # Reconstruct minimal ingest-compatible records from dashboard fields.
-        records = []
-        for m in raw.get("models", []):
-            rec = dict(m)
-            # Derive suite_name from model_name if absent
-            if not rec.get("suite_name"):
-                rec["suite_name"] = rec.get("model_name", "")
-            # Provide empty ingest-only fields if absent
-            rec.setdefault("run_id", args.run_id)
-            rec.setdefault("suite_outcome", "unknown")
-            rec.setdefault("suite_exit_code", None)
-            rec.setdefault(
-                "suite_tests_total", rec.get("summary", {}).get("total_tests", 0)
-            )
-            rec.setdefault("suite_tests_passed", 0)
-            rec.setdefault("suite_tests_failed", 0)
-            rec.setdefault("suite_tests_skipped", 0)
-            rec.setdefault("suite_tests_error", 0)
-            rec.setdefault("suite_tests_xfail", 0)
-            rec.setdefault(
-                "suite_tests_xpass",
-                rec.get("summary", {}).get("spyre_enabled_count", 0),
-            )
-            rec.setdefault("suite_duration_s", 0.0)
-            rec.setdefault("triggered_at", "")
-            rec.setdefault("ingested_at", "")
-            records.append(rec)
-        print(f"[info] Dashboard-envelope format detected: {len(records)} model(s)")
-    elif isinstance(raw, list):
-        records = raw
-        print(f"[info] Flat-array format detected: {len(records)} suite record(s)")
-    else:
-        print(
-            "[error] Unrecognised JSON format — expected list or {models:[...]} dict",
-            file=sys.stderr,
-        )
-        sys.exit(1)
+        records = json.load(fh)
 
     if not records:
         print("[info] JSON file contains no records — nothing to ingest.")
@@ -500,6 +456,7 @@ def main() -> None:
                 suite_row = build_suite_row(rec, args, gha_run_id, now)
                 client.insert("model_ops_suites", [suite_row], column_names=SUITE_COLS)
                 suites_inserted += 1
+                ops = rec.get("operations", {})
                 print(
                     f"  [suite ok]   {suite_name!r}  model={model_name}  "
                     f"outcome={rec.get('suite_outcome')}  "

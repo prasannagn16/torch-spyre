@@ -212,6 +212,49 @@ RE_FALLBACK_CONV = re.compile(
 )
 
 
+def _normalize_op_name(op_name: str) -> str:
+    """
+    Normalize operation names to treat similar ops as the same.
+    Implements the logic from run_all_test.py
+    
+    Examples:
+    - torch.embedding → torch.nn.functional.embedding
+    - aten.embedding.default → torch.nn.functional.embedding
+    - aten.index_copy.out → torch.index_copy_
+    - torch.index_copy.out → torch.index_copy_
+    - torch.nn_functional_embedding → torch.nn.functional.embedding
+    """
+    if not op_name:
+        return op_name
+    
+    # Convert underscores after "nn" and "functional" keywords to dots
+    # This handles cases like torch.nn_functional_embedding → torch.nn.functional.embedding
+    if 'nn_' in op_name:
+        op_name = op_name.replace('nn_', 'nn.')
+    if 'functional_' in op_name:
+        op_name = op_name.replace('functional_', 'functional.')
+    
+    # Convert aten ops to torch ops
+    if op_name.startswith('aten.'):
+        op_name = op_name.replace('aten.', 'torch.').split('.default')[0].split('.out')[0]
+    
+    # Normalize embedding operations
+    if 'embedding' in op_name.lower():
+        return 'torch.nn.functional.embedding'
+    
+    # Normalize cos/sin operations
+    if op_name in ['aten.cos', 'torch.cos']:
+        return 'torch.cos'
+    if op_name in ['aten.sin', 'torch.sin']:
+        return 'torch.sin'
+    
+    # Normalize index_copy operations
+    if 'index_copy' in op_name.lower() or 'index.copy' in op_name.lower():
+        return 'torch.index_copy_'
+    
+    return op_name
+
+
 def _op_from_test_name(test_name: str) -> str:
     """
     Derive the torch op name from a pytest test node name.
@@ -224,15 +267,39 @@ def _op_from_test_name(test_name: str) -> str:
         → torch.Tensor.contiguous
     test_model_ops_db_torch_nn_functional_linear__23_spyre_float16
         → torch.nn.functional.linear
-    test_model_ops_db_torch_index_copy___43_spyre_float16
-        → torch.index.copy.
+    test_model_ops_db_torch___eq____43_spyre_int64
+        → torch.__eq__
+    test_model_ops_db_torch__C__log_api_usage_once__16_spyre_float16
+        → torch._C._log_api_usage_once
+    test_model_ops_db_torch_index_copy_out__43_spyre_float16
+        → torch.index_copy_
     """
     # Strip known prefix
     s = re.sub(r"^test_model_ops_db_", "", test_name)
     # Strip trailing __<number>... (variant index + dtype suffix)
     s = re.sub(r"__\d+.*$", "", s)
-    # Convert underscores → dots
-    return s.replace("_", ".")
+    
+    # Replace underscores with dots in specific positions:
+    # 1. First underscore after "torch"
+    # 2. Underscore after "Tensor" (when it appears as a word)
+    # 3. Underscore after single capital letters (like _C_)
+    # All other underscores remain as underscores
+    
+    if s.startswith("torch_"):
+        # Replace the first underscore after "torch"
+        s = "torch." + s[6:]
+    
+    # Replace underscore after "Tensor" when it's a complete word
+    s = re.sub(r'\bTensor_', 'Tensor.', s)
+    
+    # Replace underscore after single capital letter (like _C_)
+    # Pattern: underscore + single capital letter + underscore → underscore + capital + dot
+    s = re.sub(r'_([A-Z])_', r'_\1.', s)
+    
+    # Apply normalization (handles embedding, index_copy, cos, sin)
+    s = _normalize_op_name(s)
+    
+    return s
 
 
 def _clean(s: str) -> str:
@@ -406,13 +473,13 @@ class _TestLogAnalyzer:
             if m:
                 aten = m.group("op")
                 torch_op = aten.replace("aten.", "torch.").split(".default")[0]
+                # Apply normalization (handles embedding, index_copy, cos, sin)
+                torch_op = _normalize_op_name(torch_op)
                 self.fallback_ops.add(torch_op)
                 return
             m = RE_FALLBACK_CONV.search(line)
             if m:
-                self.fallback_ops.add(
-                    f"type_conversion_{m.group('src')}_to_{m.group('dst')}"
-                )
+                # Skip type_conversion operations - don't add them to fallback_ops
                 return
 
         # ── (A) GHA compact: test + inline XPASS/XFAIL ───────────────────
@@ -487,12 +554,19 @@ class _TestLogAnalyzer:
             m = RE_ARG_VALUE.search(line)
             if m:
                 raw = m.group("val").strip().strip("'\"")
-                # For reshape/view: value='(1, 12, -1, 128)' → target_shape
-                if raw.startswith("(") and (
-                    "view" in (self._pending_op or "")
-                    or "reshape" in (self._pending_op or "")
-                ):
-                    self._target_shape = raw
+                # Check if this is a shape tuple (starts with '(' and contains numbers/commas)
+                # This handles ops like torch.zeros where the shape is passed as a value
+                if raw.startswith("(") and raw.endswith(")"):
+                    # For reshape/view: value='(1, 12, -1, 128)' → target_shape
+                    if "view" in (self._pending_op or "") or "reshape" in (self._pending_op or ""):
+                        self._target_shape = raw
+                    # For ops like torch.zeros, treat the shape tuple as an input shape
+                    # Check if it looks like a shape (contains only digits, commas, spaces, and hyphens)
+                    shape_content = raw[1:-1].strip()
+                    if shape_content and all(c in "0123456789,- " for c in shape_content):
+                        self._shapes.append(raw)
+                        # Don't add to args since we're treating it as a shape
+                        return
                 self._args.append(raw)
                 return
 
@@ -623,6 +697,13 @@ class _TestLogAnalyzer:
 
     def _store(self, op: str, test: str, status: str):
         """Write the accumulated record into xpass_variants or xfail_variants."""
+        # Apply normalization to operation name
+        op = _normalize_op_name(op)
+        
+        # Skip type_conversion operations entirely
+        if op.startswith("type_conversion"):
+            return
+        
         # For ops with no tensor args but scalar value args that look like
         # shapes (e.g. torch.zeros, torch.full), promote values → input_shapes
         shapes = list(self._shapes)
@@ -685,6 +766,9 @@ def _build_spyre_failed(
     """
     Build the 'spyre_failed' section: operations that have BOTH xpass AND xfail
     variants (partial support — some shapes work, some don't).
+    
+    Special handling: If an operation appears in both spyre_enabled (xpass) and
+    cpu_fallback, it should be moved entirely to cpu_fallback with all details.
     """
     xpass_by_op: dict[str, list] = defaultdict(list)
     xfail_by_op: dict[str, list] = defaultdict(list)
@@ -793,6 +877,12 @@ def parse_log_file(
     """
     Parse one GHA job log and return a single suite-level record that contains
     every per-variant result plus the suite summary stats.
+    
+    Implements the same priority logic as run_all_test.py:
+    1. CPU fallback takes precedence - ops with fallback warnings are moved from
+       spyre_enabled to cpu_fallback with full variant details
+    2. Operations in both XPASS and XFAIL are classified as spyre_failed
+    3. Remaining XPASS ops are spyre_enabled, XFAIL ops are not_implemented
     """
     raw_lines = text.splitlines()
 
@@ -817,18 +907,55 @@ def parse_log_file(
     xpass_list = list(analyzer.xpass_variants.values())
     xfail_list = list(analyzer.xfail_variants.values())
 
-    # Build CPU-fallback list — pure fallback ops (not XPASS/XFAIL)
+    # PRIORITY 1: Move operations with CPU fallback warnings from spyre_enabled to cpu_fallback
+    # CPU fallback takes precedence over spyre_enabled (matching run_all_test.py logic)
     xpass_ops = {v["operation"] for v in xpass_list}
     xfail_ops = {v["operation"] for v in xfail_list}
+    
+    # Operations that have fallback warnings AND appear in XPASS
+    cpu_fallback_with_variants = {}
+    ops_to_remove_from_xpass = set()
+    
+    for op_name in analyzer.fallback_ops:
+        if op_name in xpass_ops:
+            # Collect all XPASS variants for this operation
+            cpu_fallback_with_variants[op_name] = [
+                v for v in xpass_list if v["operation"] == op_name
+            ]
+            ops_to_remove_from_xpass.add(op_name)
+    
+    # Remove fallback ops from xpass_list
+    xpass_list = [v for v in xpass_list if v["operation"] not in ops_to_remove_from_xpass]
+    
+    # Update xpass_ops set after removal
+    xpass_ops = {v["operation"] for v in xpass_list}
+    
+    # Pure CPU fallback ops (no XPASS variants found)
     cpu_fallback_ops = analyzer.fallback_ops - xpass_ops - xfail_ops
 
-    # Derive spyre-failed (mixed): ops with both XPASS and XFAIL variants
+    # PRIORITY 2: Derive spyre-failed (mixed): ops with both XPASS and XFAIL variants
     # Remove those ops from the clean spyre_enabled / not_implemented groups
     mixed_ops = {v["operation"] for v in xpass_list} & {
         v["operation"] for v in xfail_list
     }
     pure_xpass = [v for v in xpass_list if v["operation"] not in mixed_ops]
     pure_xfail = [v for v in xfail_list if v["operation"] not in mixed_ops]
+
+    # Build cpu_fallback list with full variant information (matching run_all_test.py format)
+    cpu_fallback_list = []
+    for op_name in sorted(analyzer.fallback_ops):
+        if op_name in cpu_fallback_with_variants:
+            # Include full variant information for ops that had XPASS variants
+            cpu_fallback_list.append({
+                "operation": op_name,
+                "variant_count": len(cpu_fallback_with_variants[op_name]),
+                "variants": cpu_fallback_with_variants[op_name]
+            })
+        else:
+            # Just the operation name (no XPASS variants found)
+            cpu_fallback_list.append({
+                "operation": op_name
+            })
 
     yaml_file = _yaml_file_from_model_name(model_name)
 
@@ -842,14 +969,14 @@ def parse_log_file(
             "total_tests": stats["tests_total"],
             "spyre_enabled_count": len(pure_xpass),
             "not_implemented_count": len(pure_xfail),
-            "cpu_fallback_count": len(cpu_fallback_ops),
+            "cpu_fallback_count": len(analyzer.fallback_ops),
             "spyre_failed_count": len(mixed_ops),
         },
         # Operations breakdown
         "operations": {
             "spyre_enabled": _group_by_operation(pure_xpass),
             "not_implemented": _group_by_operation(pure_xfail),
-            "cpu_fallback": [{"operation": op} for op in sorted(cpu_fallback_ops)],
+            "cpu_fallback": cpu_fallback_list,
             "spyre_failed": _build_spyre_failed(xpass_list, xfail_list),
         },
         # Suite-level outcome (for ingest_model_ops.py aggregation)

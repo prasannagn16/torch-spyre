@@ -69,10 +69,10 @@ jobs:
             config: granite-3.3-8b-instruct.yaml
           - name: Granite 3.3 8B Instruct Spyre
             config: granite-3.3-8b-instruct_spyre.yaml
-          # - name: Granite 4.0 H Tiny   # omitted for now
-          #   config: granite-4.0-h-tiny.yaml
-          # - name: Granite 4.0 H Tiny Spyre   # omitted for now
-          #   config: granite-4.0-h-tiny_spyre.yaml
+          - name: Granite 4.1 8B
+            config: granite-4.1-8b.yaml
+          - name: Granite 4.1 8B Spyre
+            config: granite-4.1-8b_spyre.yaml
           - name: Meta Llama 3.1 8B Instruct
             config: Meta-Llama-3.1-8B-Instruct.yaml
           - name: Meta Llama 3.1 8B Instruct Spyre
@@ -140,7 +140,6 @@ jobs:
           path: ${{ env.REPORT_PATH }}
           if-no-files-found: warn   # warn (not fail) if pytest itself crashed
           retention-days: 10
-
       # ---------------------------------------------------------------------------
       # Export the suite config name so the downstream log-ingest workflow can
       # correlate raw GHA job logs with the correct model / config entry.
