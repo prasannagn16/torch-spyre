@@ -9,10 +9,10 @@ on:
       - docs/**
       - README.md
   # Removing from CICD till the ops tests get matured
-  # pull_request:
-  #   branches: [main]
-  # merge_group:
-  #   types: [checks_requested]
+  pull_request:
+    branches: [main]
+  merge_group:
+    types: [checks_requested]
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
@@ -25,6 +25,7 @@ defaults:
 permissions:
   contents: read
   checks: write
+  actions: read    # needed by push-model-ops-logs-to-clickhouse to fetch job logs
 
 jobs:
   model-ops-tests:
@@ -138,3 +139,18 @@ jobs:
           path: ${{ env.REPORT_PATH }}
           if-no-files-found: warn   # warn (not fail) if pytest itself crashed
           retention-days: 10
+
+      # ---------------------------------------------------------------------------
+      # Export the suite config name so the downstream log-ingest workflow can
+      # correlate raw GHA job logs with the correct model / config entry.
+      # ---------------------------------------------------------------------------
+      - name: Annotate job with suite metadata
+        if: always()
+        run: |
+          echo "model_ops_suite=${{ matrix.suite.name }}"   >> "$GITHUB_ENV"
+          echo "model_ops_config=${{ matrix.suite.config }}" >> "$GITHUB_ENV"
+          echo "### Model-ops suite: ${{ matrix.suite.name }}" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Key | Value |" >> "$GITHUB_STEP_SUMMARY"
+          echo "|---|---|" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Config | \`${{ matrix.suite.config }}\` |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Report | \`${{ env.REPORT_NAME }}\` |" >> "$GITHUB_STEP_SUMMARY"
