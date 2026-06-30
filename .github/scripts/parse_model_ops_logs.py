@@ -94,26 +94,80 @@ _RE_ANSI = re.compile(r"\x1b(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])")
 _RE_CTRL = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]+")
 
 # ---------------------------------------------------------------------------
-# TestLogAnalyzer patterns  (ported from run_all_test.py)
+# TestLogAnalyzer patterns
 # ---------------------------------------------------------------------------
 
-# XPASS / XFAIL status lines emitted by pytest
-RE_XPASS_LINE = re.compile(r"^\s*XPASS")
-RE_XFAIL_LINE = re.compile(r"^\s*XFAIL")
-
-# Pytest verbose separator line:
-#   "test_model_ops_v2.py::TestSpyreModelOpsPRIVATEUSE1::test_model_ops_db_torch_mul__1_spyre_float16"
-RE_TEST_SEP = re.compile(
-    r"(?:test_model_ops_v2\.py::[^:]+::|::|^)"
+# GHA compact format (used in CI logs):
+#   "test_model_ops_v2.py::Class::test_name XPASS [TAGS...]  [N%]"
+#   Followed on subsequent lines by the [INPUT SHAPES] block.
+RE_TEST_INLINE = re.compile(
+    r"test_model_ops_v2\.py::[^:]+::"
     r"(?P<test>test_model_ops_db_[\w]+)"
+    r"\s+(?P<status>XPASS|XFAIL)"
 )
 
-# Op info line:  "Op: torch.mul | Test: test_model_ops_db_torch_mul__1_spyre_float16"
+# GHA stall-watcher variant — the stall message interrupts the line so the
+# status appears on the NEXT line by itself:
+#   "…::test_name [stall-watcher] No new output for 30s …"
+#   "XPASS [TAGS …]"
+# We capture the test name only (no status); the deferred-commit path picks
+# up the XPASS/XFAIL that follows.
+RE_TEST_STALL = re.compile(
+    r"test_model_ops_v2\.py::[^:]+::"
+    r"(?P<test>test_model_ops_db_[\w]+)"
+    r"\s+\[stall-watcher\]"
+)
+
+# Legacy verbose format: status appears on a separate line AFTER Op:/Input: lines.
+# Separator line (no inline status):
+RE_TEST_SEP_ONLY = re.compile(
+    r"test_model_ops_v2\.py::[^:]+::"
+    r"(?P<test>test_model_ops_db_[\w]+)"
+    r"(?!\s+(?:XPASS|XFAIL))"  # negative lookahead — no inline status
+)
+
+# Standalone XPASS/XFAIL line (stall-watcher or legacy verbose)
+RE_XPASS_ALONE = re.compile(r"^XPASS\b")
+RE_XFAIL_ALONE = re.compile(r"^XFAIL\b")
+
+# Legacy: "Op: torch.mul | Test: test_model_ops_db_torch_mul__1_spyre_float16"
 RE_OP_LINE = re.compile(
     r"Op:\s+(?P<op>[\w.]+)\s+\|\s+Test:\s+(?P<test>test_model_ops_db_[\w]+)"
 )
 
-# Single-tensor input:
+# Legacy: XPASS / XFAIL on their own line
+RE_XPASS_LINE = re.compile(r"^\s*XPASS")
+RE_XFAIL_LINE = re.compile(r"^\s*XFAIL")
+
+# [INPUT SHAPES] section header (GHA format, appears AFTER the test+status line)
+RE_INPUT_SHAPES_HDR = re.compile(r"^\[INPUT SHAPES\]$")
+
+# arg[N]: Tensor(shape=[…], dtype=torch.x, stride=[…])
+RE_ARG_TENSOR = re.compile(
+    r"arg\[\d+\]:\s+Tensor\("
+    r"shape=(?P<shape>\[[\d,\s\-]+\]),\s+"
+    r"dtype=(?P<dtype>torch\.\w+),\s+"
+    r"stride=(?P<stride>\[[\d,\s\-]+\])\)"
+)
+
+# arg[N]: TensorList[Tensor(…), …]
+RE_ARG_TENSORLIST = re.compile(r"arg\[\d+\]:\s+TensorList\[(?P<contents>.+)\]")
+
+# Individual Tensor inside TensorList
+RE_TENSOR_IN_LIST = re.compile(
+    r"Tensor\("
+    r"shape=(?P<shape>\[[\d,\s\-]+\]),\s+"
+    r"dtype=(?P<dtype>torch\.\w+),\s+"
+    r"stride=(?P<stride>\[[\d,\s\-]+\])\)"
+)
+
+# arg[N]: value=<scalar or quoted string>
+RE_ARG_VALUE = re.compile(r"arg\[\d+\]:\s+value=(?P<val>.+)")
+
+# arg[N]: py='<python repr>'  (slice objects etc. — treated as arg_values)
+RE_ARG_PY = re.compile(r"arg\[\d+\]:\s+py=(?P<val>.+)")
+
+# Legacy single-tensor input line:
 #   "Input: shape=[1, 41, 4096], stride=[167936, 4096, 1], dtype=torch.bfloat16"
 RE_INPUT_SINGLE = re.compile(
     r"Input:\s+shape=(?P<shape>\[[\d,\s]+\]),\s+"
@@ -121,29 +175,30 @@ RE_INPUT_SINGLE = re.compile(
     r"dtype=(?P<dtype>torch\.\w+)"
 )
 
-# Tensor in a list:
-#   "  [0]: shape=[1, 41, 64], stride=[2624, 1, 41], dtype=torch.float32"
-# NOTE: after GHA timestamp prefix is stripped and _clean() is called the
-# leading spaces are gone, so we match \s* (zero or more) not \s+.
+# Legacy tensor-in-list item:
+#   "  [0]: shape=[…], stride=[…], dtype=torch.x"
 RE_INPUT_LIST_ITEM = re.compile(
     r"^\s*\[\d+\]:\s+shape=(?P<shape>\[[\d,\s]+\]),\s+"
     r"stride=(?P<stride>\[[\d,\s]+\]),\s+"
     r"dtype=(?P<dtype>torch\.\w+)"
 )
 
-# Tensor in Args block:
-#   "  [0]: Tensor(shape=[1, 41, 4096], stride=[167936, 4096, 1], dtype=torch.bfloat16)"
+# Legacy tensor-in-Args block:
+#   "  [0]: Tensor(shape=[…], stride=[…], dtype=torch.x)"
 RE_ARGS_TENSOR = re.compile(
     r"^\s*\[\d+\]:\s+Tensor\(shape=(?P<shape>\[[\d,\s]+\]),\s+"
     r"stride=(?P<stride>\[[\d,\s]+\]),\s+"
     r"dtype=(?P<dtype>torch\.\w+)\)"
 )
 
-# Non-tensor arg value lines:  "  [0]: 1e-05"  or  "  [1]: 'torch.float32'"
-RE_ARG_VALUE = re.compile(r"^\s*\[\d+\]:\s+(?!Tensor\()(?P<val>.+)$")
+# Legacy non-tensor arg value:  "  [0]: 1e-05"
+RE_LEGACY_ARG_VALUE = re.compile(r"^\s*\[\d+\]:\s+(?!Tensor\()(?P<val>.+)$")
 
-# Target shape lines (for reshape/view):  "Target shape: (1, 12, -1, 128)"
+# Legacy Target shape:  "Target shape: (1, 12, -1, 128)"
 RE_TARGET_SHAPE = re.compile(r"Target shape:\s+(?P<shape>\([^)]+\))")
+
+# Legacy Input: List of N tensors header
+RE_INPUT_LIST_HDR = re.compile(r"Input:\s+List of \d+ tensors:")
 
 # FallbackWarning:
 #   "FallbackWarning: aten.cos.default is falling back to cpu"
@@ -156,8 +211,28 @@ RE_FALLBACK_CONV = re.compile(
     r"(?P<dst>torch\.\w+)\s+is falling back"
 )
 
-# Input: List of N tensors  (header — no data, just marks start)
-RE_INPUT_LIST_HDR = re.compile(r"Input:\s+List of \d+ tensors:")
+
+def _op_from_test_name(test_name: str) -> str:
+    """
+    Derive the torch op name from a pytest test node name.
+
+    Examples
+    --------
+    test_model_ops_db_torch_mul__1_spyre_float16
+        → torch.mul
+    test_model_ops_db_torch_Tensor_contiguous__49_spyre_float16
+        → torch.Tensor.contiguous
+    test_model_ops_db_torch_nn_functional_linear__23_spyre_float16
+        → torch.nn.functional.linear
+    test_model_ops_db_torch_index_copy___43_spyre_float16
+        → torch.index.copy.
+    """
+    # Strip known prefix
+    s = re.sub(r"^test_model_ops_db_", "", test_name)
+    # Strip trailing __<number>... (variant index + dtype suffix)
+    s = re.sub(r"__\d+.*$", "", s)
+    # Convert underscores → dots
+    return s.replace("_", ".")
 
 
 def _clean(s: str) -> str:
@@ -200,7 +275,11 @@ _SKIP_NAMES = re.compile(
 
 
 def _suite_from_filename(filename: str):
-    """Return (suite_name_or_None, model_name_or_None)."""
+    """Return (suite_name_or_None, model_name_or_None).
+
+    Only files whose suite name ends with "Spyre" (case-insensitive) are
+    accepted.  Non-Spyre jobs (e.g. "GPT OSS 20B.txt") are skipped.
+    """
     stem = re.sub(r"\.txt$", "", filename, flags=re.IGNORECASE)
     stem = re.sub(r"^\d+_", "", stem).strip()
     if _SKIP_NAMES.match(stem):
@@ -213,6 +292,10 @@ def _suite_from_filename(filename: str):
     elif re.search(r"[A-Z]", stem) and (" " in stem or "-" in stem):
         suite_name = stem
     else:
+        return None, None
+
+    # Only process Spyre jobs
+    if not re.search(r"\bSpyre\b", suite_name, re.IGNORECASE):
         return None, None
 
     # Derive model_name: lower-case, spaces→hyphens, collapse repeated hyphens
@@ -255,50 +338,69 @@ def _pick_log_files(log_dir: Path):
 
 
 # ---------------------------------------------------------------------------
-# Core per-file parser  (TestLogAnalyzer logic)
+# Core per-file parser
 # ---------------------------------------------------------------------------
 
 
 class _TestLogAnalyzer:
     """
     Stateful line-by-line parser for a single model-ops GHA job log.
-    Mirrors the run_all_test.py TestLogAnalyzer logic exactly.
+
+    Supports two log formats:
+
+    (A) GHA compact format (CI logs downloaded from GitHub Actions):
+        test_model_ops_v2.py::Class::test_name XPASS [TAGS...]  [N%]
+          [INPUT SHAPES]
+          arg[0]: Tensor(shape=[1, 12, 4096], dtype=torch.float16, stride=[49152, 4096, 1])
+          arg[1]: value=1e-05
+          arg[2]: value='(1, 12, -1, 128)'
+          arg[3]: TensorList[Tensor(shape=…), …]
+          arg[4]: py='(None, slice(None, None, None), None)'
+
+        XPASS/XFAIL is on the same line as the test id; [INPUT SHAPES] follows.
+        The record is only committed when the [INPUT SHAPES] block ends
+        (empty line or next test separator) so shapes are captured correctly.
+
+    (B) Legacy verbose (-v -s) format:
+        test_model_ops_v2.py::Class::test_name
+          Op: torch.mul | Test: test_name
+          Input: shape=…, stride=…, dtype=…
+          Args:
+            [0]: 0.5
+          Target shape: (…)
+        XPASS […]
     """
 
     def __init__(self):
-        # Variant storage: key → dict
+        # Completed variant records
         self.xpass_variants: dict[str, dict] = {}
         self.xfail_variants: dict[str, dict] = {}
         self.fallback_ops: set = set()
 
-        # Per-test state (reset on each new test separator line)
-        self._test_name: str | None = None
-        self._op_name: str | None = None
+        # Pending record being built (test seen, shapes not yet collected)
+        self._pending_test: str | None = None
+        self._pending_op: str | None = None
+        self._pending_status: str | None = None  # "XPASS" | "XFAIL"
+        self._in_shapes_block: bool = False  # inside [INPUT SHAPES]
+
+        # Accumulated shape/stride/dtype/arg data for the pending record
         self._shapes: list[str] = []
         self._strides: list[str] = []
         self._dtypes: list[str] = []
         self._args: list[str] = []
         self._target_shape: str = ""
-        self._in_block: bool = False
 
-    # ---- public ---------------------------------------------------------
-    #
-    # Real pytest -v -s log order for each test variant:
-    #
-    #   test_model_ops_v2.py::Class::test_name   ← separator (reset state)
-    #     Op: torch.mul | Test: test_name         ← set op_name + test_name
-    #     Input: shape=…, stride=…, dtype=…       ← collect tensor info
-    #     Args:
-    #       [0]: 0.5                               ← collect arg values
-    #     Target shape: (…)                        ← optional for reshape
-    #   XPASS […]                                  ← COMMIT (status known now)
-    #
-    # This matches run_all_test.py::TestLogAnalyzer.parse_log_line() exactly.
+        # Legacy verbose-format state
+        self._legacy_op: str | None = None
+        self._legacy_test: str | None = None
+        self._legacy_in_block: bool = False
+
+    # ── public ────────────────────────────────────────────────────────────
 
     def feed(self, line: str):
         line = _clean(line)
 
-        # ── FallbackWarning (can appear anywhere) ────────────────────────
+        # FallbackWarning can appear anywhere — handle first
         if "FallbackWarning" in line:
             m = RE_FALLBACK_ATEN.search(line)
             if m:
@@ -313,42 +415,139 @@ class _TestLogAnalyzer:
                 )
                 return
 
-        # ── Pytest verbose separator → start new test block ──────────────
-        # Must be checked BEFORE Op: line so we always reset on a new test.
-        m = RE_TEST_SEP.search(line)
-        if m and "::" in line:
-            self._start_new_test(m.group("test"))
+        # ── (A) GHA compact: test + inline XPASS/XFAIL ───────────────────
+        m = RE_TEST_INLINE.search(line)
+        if m:
+            # Commit any previous pending record before starting a new one
+            self._flush_pending()
+            self._pending_test = m.group("test")
+            self._pending_op = _op_from_test_name(self._pending_test)
+            self._pending_status = m.group("status")
+            self._in_shapes_block = False
+            self._clear_shape_state()
             return
 
-        # ── Op info line → record op name + test name ────────────────────
+        # ── (A) Stall-watcher: test on this line, XPASS/XFAIL on next line ─
+        m = RE_TEST_STALL.search(line)
+        if m:
+            self._flush_pending()
+            self._pending_test = m.group("test")
+            self._pending_op = _op_from_test_name(self._pending_test)
+            self._pending_status = None  # will be set by standalone XPASS/XFAIL
+            self._in_shapes_block = False
+            self._clear_shape_state()
+            return
+
+        # ── (A/stall) Standalone XPASS/XFAIL → set status on pending record ─
+        # Handles stall-watcher split lines and legacy verbose fallback.
+        if RE_XPASS_ALONE.match(line):
+            if self._pending_test and self._pending_status is None:
+                self._pending_status = "XPASS"
+            elif self._legacy_op and self._legacy_test:
+                self._commit_legacy("XPASS")
+            return
+        if RE_XFAIL_ALONE.match(line):
+            if self._pending_test and self._pending_status is None:
+                self._pending_status = "XFAIL"
+            elif self._legacy_op and self._legacy_test:
+                self._commit_legacy("XFAIL")
+            return
+
+        # ── (A) [INPUT SHAPES] header ─────────────────────────────────────
+        if RE_INPUT_SHAPES_HDR.match(line):
+            if self._pending_test and self._pending_status:
+                self._in_shapes_block = True
+            return
+
+        # ── (A) arg[N] lines inside [INPUT SHAPES] ────────────────────────
+        if self._in_shapes_block and self._pending_test:
+            # Empty line ends the block → commit
+            if not line:
+                self._flush_pending()
+                return
+
+            # arg[N]: Tensor(shape=…, dtype=…, stride=…)
+            m = RE_ARG_TENSOR.search(line)
+            if m:
+                self._shapes.append(_compact_shape(m.group("shape")))
+                self._strides.append(_compact_shape(m.group("stride")))
+                self._dtypes.append(m.group("dtype"))
+                return
+
+            # arg[N]: TensorList[Tensor(…), …]
+            m = RE_ARG_TENSORLIST.search(line)
+            if m:
+                for tm in RE_TENSOR_IN_LIST.finditer(m.group("contents")):
+                    self._shapes.append(_compact_shape(tm.group("shape")))
+                    self._strides.append(_compact_shape(tm.group("stride")))
+                    self._dtypes.append(tm.group("dtype"))
+                return
+
+            # arg[N]: value=…
+            m = RE_ARG_VALUE.search(line)
+            if m:
+                raw = m.group("val").strip().strip("'\"")
+                # For reshape/view: value='(1, 12, -1, 128)' → target_shape
+                if raw.startswith("(") and (
+                    "view" in (self._pending_op or "")
+                    or "reshape" in (self._pending_op or "")
+                ):
+                    self._target_shape = raw
+                self._args.append(raw)
+                return
+
+            # arg[N]: py=… (slice objects, index expressions)
+            m = RE_ARG_PY.search(line)
+            if m:
+                self._args.append(m.group("val").strip().strip("'\""))
+                return
+
+            # Another test line starting — flush first, then re-process
+            if "test_model_ops_v2.py::" in line:
+                self._flush_pending()
+                self.feed(line)  # re-enter to handle as new test
+            return
+
+        # ── (B) Legacy verbose format ─────────────────────────────────────
+
+        # Legacy separator (no inline XPASS/XFAIL)
+        m = RE_TEST_SEP_ONLY.search(line)
+        if m and "::" in line:
+            self._flush_pending()
+            self._legacy_test = m.group("test")
+            self._legacy_op = _op_from_test_name(self._legacy_test)
+            self._legacy_in_block = True
+            return
+
+        # Legacy Op: line overrides op name
         m = RE_OP_LINE.search(line)
         if m:
-            self._op_name = m.group("op")
-            self._test_name = m.group("test")
-            self._in_block = True
+            self._legacy_op = m.group("op")
+            self._legacy_test = m.group("test")
+            self._legacy_in_block = True
             return
 
-        # ── XPASS / XFAIL → COMMIT (data already collected above) ────────
-        # These appear AFTER Op:/Input:/Args: lines in real pytest output.
+        # Legacy XPASS/XFAIL on its own line (already handled above for
+        # stall-watcher pending; if we reach here it's pure legacy verbose)
         if RE_XPASS_LINE.match(line):
-            if self._op_name and self._test_name:
-                self._commit("XPASS")
+            if self._legacy_op and self._legacy_test:
+                self._commit_legacy("XPASS")
             return
         if RE_XFAIL_LINE.match(line):
-            if self._op_name and self._test_name:
-                self._commit("XFAIL")
+            if self._legacy_op and self._legacy_test:
+                self._commit_legacy("XFAIL")
             return
 
-        if not self._in_block:
+        if not self._legacy_in_block:
             return
 
-        # ── Target shape ─────────────────────────────────────────────────
+        # Legacy Target shape
         m = RE_TARGET_SHAPE.search(line)
         if m:
             self._target_shape = m.group("shape")
             return
 
-        # ── Single-tensor input ──────────────────────────────────────────
+        # Legacy single-tensor Input: line
         m = RE_INPUT_SINGLE.search(line)
         if m:
             self._shapes.append(_compact_shape(m.group("shape")))
@@ -356,11 +555,10 @@ class _TestLogAnalyzer:
             self._dtypes.append(m.group("dtype"))
             return
 
-        # ── List-of-tensors header ────────────────────────────────────────
         if RE_INPUT_LIST_HDR.search(line):
-            return  # header only; items follow on next lines
+            return
 
-        # ── Tensor within a list ─────────────────────────────────────────
+        # Legacy [0]: shape=…
         m = RE_INPUT_LIST_ITEM.search(line)
         if m:
             self._shapes.append(_compact_shape(m.group("shape")))
@@ -368,7 +566,7 @@ class _TestLogAnalyzer:
             self._dtypes.append(m.group("dtype"))
             return
 
-        # ── Tensor in Args block ─────────────────────────────────────────
+        # Legacy [0]: Tensor(…)
         m = RE_ARGS_TENSOR.search(line)
         if m:
             self._shapes.append(_compact_shape(m.group("shape")))
@@ -376,64 +574,88 @@ class _TestLogAnalyzer:
             self._dtypes.append(m.group("dtype"))
             return
 
-        # ── Non-tensor arg value ─────────────────────────────────────────
-        m = RE_ARG_VALUE.match(line)
+        # Legacy [0]: non-tensor value
+        m = RE_LEGACY_ARG_VALUE.match(line)
         if m:
             val = m.group("val").strip()
-            # Skip lines that look like shape/stride/dtype summaries
             if not re.match(r"^(shape|stride|dtype|Tensor|Args)\b", val, re.IGNORECASE):
                 self._args.append(val)
 
     def finish(self):
-        """No-op — in real logs every test ends with XPASS/XFAIL before the
-        next separator, so nothing is left pending. Kept for safety."""
-        pass
+        """Flush any pending record at end of file."""
+        self._flush_pending()
 
-    # ---- internal -------------------------------------------------------
+    # ── internal ─────────────────────────────────────────────────────────
 
-    def _start_new_test(self, test_name: str):
-        """Reset all per-test state for a new test separator line."""
-        self._op_name = None
-        self._test_name = test_name
+    def _clear_shape_state(self):
         self._shapes = []
         self._strides = []
         self._dtypes = []
         self._args = []
         self._target_shape = ""
-        self._in_block = True
 
-    def _commit(self, status: str):
-        if not (self._op_name and self._test_name):
-            return
-        key = f"{self._op_name}|{self._test_name}"
+    def _flush_pending(self):
+        """Commit the pending GHA-format record (if any) and reset pending state."""
+        if self._pending_test and self._pending_status and self._pending_op:
+            self._store(
+                op=self._pending_op,
+                test=self._pending_test,
+                status=self._pending_status,
+            )
+        self._pending_test = None
+        self._pending_op = None
+        self._pending_status = None
+        self._in_shapes_block = False
+        self._clear_shape_state()
+
+    def _commit_legacy(self, status: str):
+        """Commit a legacy verbose-format record."""
+        if self._legacy_op and self._legacy_test:
+            self._store(
+                op=self._legacy_op,
+                test=self._legacy_test,
+                status=status,
+            )
+        self._legacy_op = None
+        self._legacy_test = None
+        self._legacy_in_block = False
+        self._clear_shape_state()
+
+    def _store(self, op: str, test: str, status: str):
+        """Write the accumulated record into xpass_variants or xfail_variants."""
+        # For ops with no tensor args but scalar value args that look like
+        # shapes (e.g. torch.zeros, torch.full), promote values → input_shapes
+        shapes = list(self._shapes)
+        strides = list(self._strides)
+        dtypes = list(self._dtypes)
+        args = list(self._args)
+        target_shape = self._target_shape
+
+        if not shapes and args:
+            # Heuristic: if the only args look like dimension lists, use as shapes
+            shape_like = [a for a in args if re.match(r"^[\d,\s]+$", a)]
+            if shape_like:
+                shapes = [f"[{a.replace(' ', '')}]" for a in shape_like]
+                args = [a for a in args if a not in shape_like]
+
+        key = f"{op}|{test}"
         record = {
-            "operation": self._op_name,
+            "operation": op,
             "classification": "spyre_enabled"
             if status == "XPASS"
             else "not_implemented",
-            "test_name": self._test_name,
-            "input_shapes": list(self._shapes),
-            "input_strides": list(self._strides),
-            "input_dtypes": list(self._dtypes),
-            "arg_values": list(self._args),
-            "target_shape": self._target_shape,
+            "test_name": test,
+            "input_shapes": shapes,
+            "input_strides": strides,
+            "input_dtypes": dtypes,
+            "arg_values": args,
+            "target_shape": target_shape,
             "status": status,
         }
         if status == "XPASS":
             self.xpass_variants[key] = record
         else:
             self.xfail_variants[key] = record
-        self._reset()
-
-    def _reset(self):
-        self._op_name = None
-        self._test_name = None
-        self._shapes = []
-        self._strides = []
-        self._dtypes = []
-        self._args = []
-        self._target_shape = ""
-        self._in_block = False
 
 
 def _group_by_operation(variants: list[dict]) -> list[dict]:
@@ -685,6 +907,16 @@ def main() -> None:
         action="store_true",
         help="Write compact (non-indented) JSON",
     )
+    parser.add_argument(
+        "--ingest-json",
+        metavar="FILE",
+        default=None,
+        help=(
+            "Also write a flat-array JSON (one record per suite, all ingest fields "
+            "preserved) for use by ingest_model_ops.py.  "
+            "If omitted, only the dashboard-format --out file is written."
+        ),
+    )
     args = parser.parse_args()
 
     log_dir = Path(args.log_dir)
@@ -751,12 +983,34 @@ def main() -> None:
     print(f"[info]  Error        : {n_error}", file=sys.stderr)
 
     # ── Write outputs ─────────────────────────────────────────────────────
-    json_text = json.dumps(all_records, indent=None if args.compact else 2)
-    Path(args.out).write_text(json_text)
-    print(f"[info]  JSON written to : {args.out}", file=sys.stderr)
+    indent = None if args.compact else 2
+
+    # (1) Dashboard-compatible envelope {total_models, models:[...]}
+    #     Strips ingest-only fields so the dashboard JSON is clean.
+    dashboard_models = []
+    for rec in all_records:
+        dashboard_models.append(
+            {
+                "model_name": rec["model_name"],
+                "yaml_file": rec["yaml_file"],
+                "summary": rec["summary"],
+                "operations": rec["operations"],
+            }
+        )
+    dashboard_output = {
+        "total_models": len(dashboard_models),
+        "models": dashboard_models,
+    }
+    Path(args.out).write_text(json.dumps(dashboard_output, indent=indent))
+    print(f"[info]  Dashboard JSON  : {args.out}", file=sys.stderr)
+
+    # (2) Optional flat-array for ingest_model_ops.py (all fields preserved)
+    if args.ingest_json:
+        Path(args.ingest_json).write_text(json.dumps(all_records, indent=indent))
+        print(f"[info]  Ingest JSON     : {args.ingest_json}", file=sys.stderr)
 
     Path(args.log_out).write_text("\n".join(log_sections))
-    print(f"[info]  Log  written to : {args.log_out}", file=sys.stderr)
+    print(f"[info]  Log             : {args.log_out}", file=sys.stderr)
 
 
 if __name__ == "__main__":
