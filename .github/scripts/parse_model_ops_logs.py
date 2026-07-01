@@ -52,7 +52,7 @@ Usage
 
 import argparse
 import json
-import re
+import regex as re
 import sys
 from collections import defaultdict
 from datetime import datetime, timezone
@@ -556,23 +556,50 @@ class _TestLogAnalyzer:
             m = RE_ARG_VALUE.search(line)
             if m:
                 raw = m.group("val").strip().strip("'\"")
-                # Check if this is a shape tuple (starts with '(' and contains numbers/commas)
-                # This handles ops like torch.zeros where the shape is passed as a value
+                op = self._pending_op or ""
+
+                # Check if this is a shape (tuple or list format)
+                is_shape = False
+                shape_content = ""
+
+                # Handle tuple format: (1, 2, 3)
                 if raw.startswith("(") and raw.endswith(")"):
-                    # For reshape/view: value='(1, 12, -1, 128)' → target_shape
-                    if "view" in (self._pending_op or "") or "reshape" in (
-                        self._pending_op or ""
-                    ):
-                        self._target_shape = raw
-                    # For ops like torch.zeros, treat the shape tuple as an input shape
-                    # Check if it looks like a shape (contains only digits, commas, spaces, and hyphens)
                     shape_content = raw[1:-1].strip()
-                    if shape_content and all(
-                        c in "0123456789,- " for c in shape_content
-                    ):
-                        self._shapes.append(raw)
-                        # Don't add to args since we're treating it as a shape
+                    is_shape = True
+                # Handle list format: [1, 2, 3]
+                elif raw.startswith("[") and raw.endswith("]"):
+                    shape_content = raw[1:-1].strip()
+                    is_shape = True
+
+                if is_shape and shape_content:
+                    is_numeric = all(c in "0123456789,- " for c in shape_content)
+
+                    # For reshape/view: record as target_shape only, not input_shapes
+                    if "view" in op or "reshape" in op:
+                        self._target_shape = raw
                         return
+
+                    # For size-creating ops (zeros/ones/empty/full/rand/randn/sym_sum):
+                    # the tuple/list IS the output shape — reformat as bracket shape string
+                    # e.g. "(1, 8, 2048, 64)" → "[1,8,2048,64]"
+                    # e.g. "[1, 65]" → "[1,65]"
+                    _SIZE_OPS = {
+                        "torch.zeros",
+                        "torch.ones",
+                        "torch.empty",
+                        "torch.full",
+                        "torch.rand",
+                        "torch.randn",
+                        "torch.sym_sum",
+                    }
+                    if is_numeric and op in _SIZE_OPS:
+                        dims = [
+                            d.strip() for d in shape_content.split(",") if d.strip()
+                        ]
+                        self._shapes.append("[" + ",".join(dims) + "]")
+                        return
+
+                    # Everything else: keep as arg_value
                 self._args.append(raw)
                 return
 
@@ -706,8 +733,9 @@ class _TestLogAnalyzer:
         # Apply normalization to operation name
         op = _normalize_op_name(op)
 
-        # Skip type_conversion operations entirely
-        if op.startswith("type_conversion"):
+        # Skip operations that don't start with "torch." (e.g. type_conversion,
+        # aten. residuals, or any other non-torch namespace)
+        if not op.startswith("torch."):
             return
 
         # For ops with no tensor args but scalar value args that look like
@@ -968,11 +996,11 @@ def parse_log_file(
         "suite_name": suite_name,
         "model_name": model_name,
         "yaml_file": yaml_file,
-        # Suite summary
+        # Suite summary — counts are number of distinct operations (groups), not variants
         "summary": {
             "total_tests": stats["tests_total"],
-            "spyre_enabled_count": len(pure_xpass),
-            "not_implemented_count": len(pure_xfail),
+            "spyre_enabled_count": len({v["operation"] for v in pure_xpass}),
+            "not_implemented_count": len({v["operation"] for v in pure_xfail}),
             "cpu_fallback_count": len(analyzer.fallback_ops),
             "spyre_failed_count": len(mixed_ops),
         },
