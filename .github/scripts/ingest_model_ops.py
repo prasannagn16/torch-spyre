@@ -10,7 +10,16 @@ rows into two ClickHouse tables:
                        (operation, shapes, dtypes, XPASS/XFAIL/FALLBACK,
                         matching exactly the JSON schema shown in the dashboard)
 
-Both tables are created automatically on first run (CREATE TABLE IF NOT EXISTS).
+Table lifecycle (every run):
+  1. DROP TABLE IF EXISTS   model_ops_variants
+  2. DROP TABLE IF EXISTS   model_ops_suites
+  3. CREATE TABLE           model_ops_suites
+  4. CREATE TABLE           model_ops_variants
+  5. INSERT all suite rows
+  6. INSERT all variant rows
+
+This guarantees the dashboard always shows only the latest run's data —
+no stale rows from previous runs are ever visible.
 
 Usage (called by the GHA workflow):
     python3 ingest_model_ops.py \\
@@ -22,6 +31,7 @@ Usage (called by the GHA workflow):
 """
 
 import argparse
+import hashlib
 import json
 import os
 import sys
@@ -34,9 +44,16 @@ import clickhouse_connect
 # ClickHouse DDL
 # ---------------------------------------------------------------------------
 
+_DROP_VARIANTS_SQL = "DROP TABLE IF EXISTS model_ops_variants"
+_DROP_SUITES_SQL = "DROP TABLE IF EXISTS model_ops_suites"
+
 _CREATE_SUITES_SQL = """
-CREATE TABLE IF NOT EXISTS model_ops_suites
+CREATE TABLE model_ops_suites
 (
+    -- ── Primary key ──────────────────────────────────────────────────────────
+    -- SHA-256( gha_run_id || suite_name ) — one unique row per suite per run
+    suite_id        FixedString(64),
+
     -- Identity / provenance
     gha_run_id      UInt64,
     run_id          String,
@@ -50,11 +67,11 @@ CREATE TABLE IF NOT EXISTS model_ops_suites
     yaml_file       String DEFAULT '',
 
     -- Counts
-    total_tests          UInt32 DEFAULT 0,
-    spyre_enabled_count  UInt32 DEFAULT 0,
+    total_tests           UInt32 DEFAULT 0,
+    spyre_enabled_count   UInt32 DEFAULT 0,
     not_implemented_count UInt32 DEFAULT 0,
-    cpu_fallback_count   UInt32 DEFAULT 0,
-    spyre_failed_count   UInt32 DEFAULT 0,
+    cpu_fallback_count    UInt32 DEFAULT 0,
+    spyre_failed_count    UInt32 DEFAULT 0,
 
     -- Suite-level pytest stats
     suite_outcome   LowCardinality(String) DEFAULT 'unknown',
@@ -73,15 +90,23 @@ CREATE TABLE IF NOT EXISTS model_ops_suites
     ingested_at     DateTime64(3, 'UTC')
 )
 ENGINE = ReplacingMergeTree(ingested_at)
-ORDER BY (gha_run_id, suite_name)
+ORDER BY suite_id          -- suite_id is the unique primary key
 PARTITION BY toYYYYMM(triggered_at)
 SETTINGS index_granularity = 8192
 """
 
 _CREATE_VARIANTS_SQL = """
-CREATE TABLE IF NOT EXISTS model_ops_variants
+CREATE TABLE model_ops_variants
 (
-    -- Provenance (joins back to model_ops_suites)
+    -- ── Primary key ──────────────────────────────────────────────────────────
+    -- SHA-256( gha_run_id || suite_name || operation || classification || test_name )
+    -- Guarantees exactly one row per test variant per run, even when test_name=""
+    variant_id      FixedString(64),
+
+    -- Foreign key back to model_ops_suites.suite_id
+    suite_id        FixedString(64),
+
+    -- Provenance
     gha_run_id      UInt64,
     run_id          String,
     workflow        LowCardinality(String) DEFAULT '',
@@ -111,7 +136,7 @@ CREATE TABLE IF NOT EXISTS model_ops_variants
     ingested_at     DateTime64(3, 'UTC')
 )
 ENGINE = ReplacingMergeTree(ingested_at)
-ORDER BY (gha_run_id, suite_name, test_name)
+ORDER BY variant_id        -- variant_id is the unique primary key
 PARTITION BY toYYYYMM(triggered_at)
 SETTINGS index_granularity = 8192
 """
@@ -173,27 +198,42 @@ def _jstr(val) -> str:
         return "[]"
 
 
+def _make_id(*parts: str) -> str:
+    """Return a 64-character hex SHA-256 digest of the concatenated parts.
+
+    Used to produce a single unique primary-key column for every row so
+    ClickHouse's ReplacingMergeTree can deduplicate on a single column.
+
+    Args:
+        *parts: strings that together identify a row uniquely.
+    """
+    raw = "\x00".join(str(p) for p in parts)
+    return hashlib.sha256(raw.encode()).hexdigest()  # 64 hex chars
+
+
 # ---------------------------------------------------------------------------
-# Deduplication
+# Table lifecycle  — DROP → CREATE (called once per ingest run)
 # ---------------------------------------------------------------------------
 
 
-def suite_already_ingested(client, gha_run_id: int, suite_name: str) -> bool:
-    result = client.query(
-        "SELECT count() FROM model_ops_suites "
-        "WHERE gha_run_id = {r:UInt64} AND suite_name = {s:String}",
-        parameters={"r": gha_run_id, "s": suite_name},
-    )
-    return result.result_rows[0][0] > 0
+def recreate_tables(client) -> None:
+    """
+    Drop both tables (if they exist) then recreate them from scratch.
+    This guarantees the dashboard always reflects only the latest run.
+    """
+    print("[info] Dropping existing tables (if any) ...")
+    # Drop variants first — it has no dependants; suites may have dependants in views
+    client.command(_DROP_VARIANTS_SQL)
+    print("[info]   model_ops_variants  — dropped")
+    client.command(_DROP_SUITES_SQL)
+    print("[info]   model_ops_suites    — dropped")
 
-
-def variants_already_ingested(client, gha_run_id: int, suite_name: str) -> bool:
-    result = client.query(
-        "SELECT count() FROM model_ops_variants "
-        "WHERE gha_run_id = {r:UInt64} AND suite_name = {s:String}",
-        parameters={"r": gha_run_id, "s": suite_name},
-    )
-    return result.result_rows[0][0] > 0
+    print("[info] Creating tables ...")
+    client.command(_CREATE_SUITES_SQL)
+    print("[info]   model_ops_suites    — created")
+    client.command(_CREATE_VARIANTS_SQL)
+    print("[info]   model_ops_variants  — created")
+    print()
 
 
 # ---------------------------------------------------------------------------
@@ -201,6 +241,7 @@ def variants_already_ingested(client, gha_run_id: int, suite_name: str) -> bool:
 # ---------------------------------------------------------------------------
 
 SUITE_COLS = [
+    "suite_id",  # ← unique primary key (SHA-256)
     "gha_run_id",
     "run_id",
     "workflow",
@@ -229,6 +270,8 @@ SUITE_COLS = [
 ]
 
 VARIANT_COLS = [
+    "variant_id",  # ← unique primary key (SHA-256)
+    "suite_id",  # ← FK to model_ops_suites
     "gha_run_id",
     "run_id",
     "workflow",
@@ -253,13 +296,16 @@ VARIANT_COLS = [
 
 def build_suite_row(rec: dict, args, gha_run_id: int, now: datetime) -> list:
     summary = rec.get("summary", {})
+    suite_name = _str(rec.get("suite_name"))
+    suite_id = _make_id(gha_run_id, suite_name)  # unique PK
     return [
+        suite_id,  # suite_id  (PK)
         gha_run_id,
         _str(rec.get("run_id") or args.run_id),
         _str(args.workflow),
         _str(args.branch),
         _str(args.sha)[:40].ljust(40)[:40],
-        _str(rec.get("suite_name")),
+        suite_name,
         _str(rec.get("model_name")),
         _str(rec.get("yaml_file")),
         _int(summary.get("total_tests")),
@@ -300,9 +346,14 @@ def _build_variant_rows(
     yaml_file = _str(rec.get("yaml_file"))
     run_id = _str(rec.get("run_id") or args.run_id)
     triggered_at = _parse_ts(rec.get("triggered_at"))
+    suite_id = _make_id(gha_run_id, suite_name)  # FK → model_ops_suites
 
     rows: list[list] = []
     ops = rec.get("operations", {})
+
+    # Counter used to break ties when test_name is empty (cpu_fallback stubs)
+    # so that every row still gets a unique variant_id.
+    _seq = [0]
 
     def _base():
         return [
@@ -317,19 +368,39 @@ def _build_variant_rows(
         ]
 
     def _variant_row(v: dict, classification: str, status: str) -> list:
-        return _base() + [
-            _str(v.get("operation")),
+        operation = _str(v.get("operation"))
+        test_name = _str(v.get("test_name"))
+        # If test_name is empty (cpu_fallback stub with no variant data),
+        # include a sequence counter so the SHA is still unique per row.
+        _seq[0] += 1
+        variant_id = _make_id(
+            gha_run_id,
+            suite_name,
+            operation,
             classification,
-            _str(v.get("test_name")),
-            status,
-            _jstr(v.get("input_shapes", [])),
-            _jstr(v.get("input_strides", [])),
-            _jstr(v.get("input_dtypes", [])),
-            _jstr(v.get("arg_values", [])),
-            _str(v.get("target_shape", "")),
-            triggered_at,
-            now,
-        ]
+            test_name,
+            _seq[0] if not test_name else "",
+        )
+        return (
+            [
+                variant_id,  # variant_id (PK)
+                suite_id,  # suite_id   (FK)
+            ]
+            + _base()
+            + [
+                operation,
+                classification,
+                test_name,
+                status,
+                _jstr(v.get("input_shapes", [])),
+                _jstr(v.get("input_strides", [])),
+                _jstr(v.get("input_dtypes", [])),
+                _jstr(v.get("arg_values", [])),
+                _str(v.get("target_shape", "")),
+                triggered_at,
+                now,
+            ]
+        )
 
     # ── spyre_enabled groups ────────────────────────────────────────────────
     for group in ops.get("spyre_enabled", []):
@@ -348,27 +419,30 @@ def _build_variant_rows(
         for v in group.get("xfail_variants", []):
             rows.append(_variant_row(v, "not_implemented", "XFAIL"))
 
-    # ── cpu_fallback (no test_name; just op name) ───────────────────────────
+    # ── cpu_fallback ────────────────────────────────────────────────────────
+    # Each entry has full variant data (same structure as spyre_enabled).
+    # Insert every variant with classification="cpu_fallback" so the service
+    # can read back shapes, dtypes, and test_names for fallback ops.
+    # Fall back to a single stub row only when variants[] is absent/empty.
     for entry in ops.get("cpu_fallback", []):
         op = _str(entry.get("operation"))
+        variants = entry.get("variants", [])
         if not op:
             continue
-        rows.append(
-            _base()
-            + [
-                op,
-                "cpu_fallback",
-                "",  # no test_name for fallback entries
-                "FALLBACK",
-                "[]",
-                "[]",
-                "[]",
-                "[]",
-                "",
-                triggered_at,
-                now,
-            ]
-        )
+        if variants:
+            for v in variants:
+                rows.append(_variant_row(v, "cpu_fallback", "FALLBACK"))
+        else:
+            # Bare entry — only an operation name, no variant detail.
+            # Use _variant_row via a minimal synthetic variant dict so
+            # variant_id and suite_id are populated consistently.
+            rows.append(
+                _variant_row(
+                    {"operation": op, "test_name": ""},
+                    "cpu_fallback",
+                    "FALLBACK",
+                )
+            )
 
     return rows
 
@@ -380,7 +454,8 @@ def _build_variant_rows(
 
 def main() -> None:
     parser = argparse.ArgumentParser(
-        description="Ingest model_ops JSON → ClickHouse (model_ops_suites + model_ops_variants)",
+        description="Ingest model_ops JSON → ClickHouse (model_ops_suites + model_ops_variants).\n"
+        "Tables are always dropped and recreated so the DB reflects only the latest run.",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=__doc__,
     )
@@ -408,7 +483,7 @@ def main() -> None:
         print("[info] JSON file contains no records — nothing to ingest.")
         sys.exit(0)
 
-    # Filter out records without a suite_name
+    # Filter out records without a valid suite_name
     records = [
         r
         for r in records
@@ -429,77 +504,61 @@ def main() -> None:
     client.command("SELECT 1")
     print("[info] Connected.\n")
 
-    # ── Ensure tables exist ───────────────────────────────────────────────────
-    print("[info] Ensuring tables exist ...")
-    client.command(_CREATE_SUITES_SQL)
-    client.command(_CREATE_VARIANTS_SQL)
-    print("[info] Tables ready.\n")
+    # ── Drop existing tables and recreate from scratch ────────────────────────
+    recreate_tables(client)
 
     gha_run_id = _int(args.run_id)
     now = datetime.now(timezone.utc).replace(tzinfo=None)
 
-    suites_inserted = 0
-    suites_skipped = 0
-    variants_inserted = 0
-    variants_skipped = 0
+    # ── Build all rows up-front ───────────────────────────────────────────────
+    all_suite_rows = []
+    all_variant_rows = []
 
     for rec in records:
         suite_name = _str(rec.get("suite_name"))
         model_name = _str(rec.get("model_name"))
 
-        # ── Suite row ───────────────────────────────────────────────────────
-        if suite_already_ingested(client, gha_run_id, suite_name):
-            print(f"  [skip-suite]    gha_run_id={gha_run_id} suite={suite_name!r}")
-            suites_skipped += 1
-        else:
-            try:
-                suite_row = build_suite_row(rec, args, gha_run_id, now)
-                client.insert("model_ops_suites", [suite_row], column_names=SUITE_COLS)
-                suites_inserted += 1
-                ops = rec.get("operations", {})
-                print(
-                    f"  [suite ok]   {suite_name!r}  model={model_name}  "
-                    f"outcome={rec.get('suite_outcome')}  "
-                    f"xpass={rec.get('summary', {}).get('spyre_enabled_count', 0)}  "
-                    f"xfail={rec.get('summary', {}).get('not_implemented_count', 0)}"
-                )
-            except Exception as exc:
-                print(f"  [suite err]  {suite_name!r}: {exc}", file=sys.stderr)
-                suites_skipped += 1
+        try:
+            suite_row = build_suite_row(rec, args, gha_run_id, now)
+            all_suite_rows.append(suite_row)
+            print(
+                f"  [suite]    {suite_name!r}  model={model_name}  "
+                f"outcome={rec.get('suite_outcome')}  "
+                f"xpass={rec.get('summary', {}).get('spyre_enabled_count', 0)}  "
+                f"xfail={rec.get('summary', {}).get('not_implemented_count', 0)}"
+            )
+        except Exception as exc:
+            print(f"  [suite err]  {suite_name!r}: {exc}", file=sys.stderr)
 
-        # ── Variant rows ────────────────────────────────────────────────────
-        if variants_already_ingested(client, gha_run_id, suite_name):
-            print(f"  [skip-variants] gha_run_id={gha_run_id} suite={suite_name!r}")
-            variants_skipped += 1
-        else:
-            try:
-                variant_rows = _build_variant_rows(rec, args, gha_run_id, now)
-                if variant_rows:
-                    client.insert(
-                        "model_ops_variants",
-                        variant_rows,
-                        column_names=VARIANT_COLS,
-                    )
-                    variants_inserted += len(variant_rows)
-                    print(f"  [variants ok] {suite_name!r}: {len(variant_rows)} rows")
-                else:
-                    print(f"  [variants 0]  {suite_name!r}: no variants found in JSON")
-            except Exception as exc:
-                print(f"  [variants err] {suite_name!r}: {exc}", file=sys.stderr)
-                variants_skipped += 1
+        try:
+            variant_rows = _build_variant_rows(rec, args, gha_run_id, now)
+            all_variant_rows.extend(variant_rows)
+            print(f"  [variants] {suite_name!r}: {len(variant_rows)} rows built")
+        except Exception as exc:
+            print(f"  [variants err] {suite_name!r}: {exc}", file=sys.stderr)
 
-    # ── Summary ──────────────────────────────────────────────────────────────
-    print("\n[info] Ingest complete")
-    print(
-        f"[info]   model_ops_suites   inserted={suites_inserted}   skipped={suites_skipped}"
-    )
-    print(
-        f"[info]   model_ops_variants inserted={variants_inserted}  skipped={variants_skipped}"
-    )
-    print(f"[info]   gha_run_id  : {gha_run_id}")
-    print(f"[info]   workflow    : {args.workflow}")
-    print(f"[info]   branch      : {args.branch}")
-    print(f"[info]   sha         : {args.sha[:12]}")
+    # ── Batch insert ──────────────────────────────────────────────────────────
+    print(f"\n[info] Inserting {len(all_suite_rows)} suite rows ...")
+    if all_suite_rows:
+        client.insert("model_ops_suites", all_suite_rows, column_names=SUITE_COLS)
+        print(f"[info]   model_ops_suites    — {len(all_suite_rows)} rows inserted")
+
+    print(f"[info] Inserting {len(all_variant_rows)} variant rows ...")
+    if all_variant_rows:
+        client.insert("model_ops_variants", all_variant_rows, column_names=VARIANT_COLS)
+        print(f"[info]   model_ops_variants  — {len(all_variant_rows)} rows inserted")
+
+    # ── Verify counts ─────────────────────────────────────────────────────────
+    n_s = client.query("SELECT count() FROM model_ops_suites").result_rows[0][0]
+    n_v = client.query("SELECT count() FROM model_ops_variants").result_rows[0][0]
+
+    print("\n[info] ── Ingest complete ──────────────────────────────────────────")
+    print(f"[info]   model_ops_suites   : {n_s} rows")
+    print(f"[info]   model_ops_variants : {n_v} rows")
+    print(f"[info]   gha_run_id         : {gha_run_id}")
+    print(f"[info]   workflow           : {args.workflow}")
+    print(f"[info]   branch             : {args.branch}")
+    print(f"[info]   sha                : {args.sha[:12]}")
 
 
 if __name__ == "__main__":

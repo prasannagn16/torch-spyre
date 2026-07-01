@@ -146,7 +146,7 @@ jobs:
       # ---------------------------------------------------------------------------
       - name: Annotate job with suite metadata
         if: always()
-        run: |
+        run: |-
           echo "model_ops_suite=${{ matrix.suite.name }}"   >> "$GITHUB_ENV"
           echo "model_ops_config=${{ matrix.suite.config }}" >> "$GITHUB_ENV"
           echo "### Model-ops suite: ${{ matrix.suite.name }}" >> "$GITHUB_STEP_SUMMARY"
