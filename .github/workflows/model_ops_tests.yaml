@@ -51,7 +51,7 @@ jobs:
     #     config: <filename inside tests/configs/model_ops_tests/>
     #
     # The JUnit XML report is automatically named after the config file, e.g.:
-    #   granite_4.0_h_tiny_spyre.yaml  ->  granite_4.0_h_tiny_spyre.xml
+    #   granite-4.1-8b.yaml  ->  granite-4.1-8b_spyre.yaml
     # ---------------------------------------------------------------------------
     strategy:
       fail-fast: false   # run all suites even if one fails
@@ -154,11 +154,16 @@ jobs:
       # ---------------------------------------------------------------------------
       - name: Annotate job with suite metadata
         if: always()
-        run: |-
-          echo "model_ops_suite=${{ matrix.suite.name }}"   >> "$GITHUB_ENV"
-          echo "model_ops_config=${{ matrix.suite.config }}" >> "$GITHUB_ENV"
-          echo "### Model-ops suite: ${{ matrix.suite.name }}" >> "$GITHUB_STEP_SUMMARY"
-          echo "| Key | Value |" >> "$GITHUB_STEP_SUMMARY"
-          echo "|---|---|" >> "$GITHUB_STEP_SUMMARY"
-          echo "| Config | \`${{ matrix.suite.config }}\` |" >> "$GITHUB_STEP_SUMMARY"
-          echo "| Report | \`${{ env.REPORT_NAME }}\` |" >> "$GITHUB_STEP_SUMMARY"
+        run: |
+          {
+            echo "model_ops_suite=${{ matrix.suite.name }}"
+            echo "model_ops_config=${{ matrix.suite.config }}"
+          } >> "$GITHUB_ENV"
+
+          {
+            echo "### Model-ops suite: ${{ matrix.suite.name }}"
+            echo "| Key | Value |"
+            echo "|---|---|"
+            echo "| Config | \`${{ matrix.suite.config }}\` |"
+            echo "| Report | \`${{ env.REPORT_NAME }}\` |"
+          } >> "$GITHUB_STEP_SUMMARY"
