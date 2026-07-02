@@ -130,11 +130,14 @@ jobs:
           JSON_FILE="model_ops_${SAFE_WF}_${TRIGGERING_RUN_ID}.json"
           echo "JSON_FILE=${JSON_FILE}" >> "$GITHUB_ENV"
 
+          LOG_FILE="model_ops_log_${TRIGGERING_SHA}_${TRIGGERING_RUN_ID}.txt"
+          echo "LOG_FILE=${LOG_FILE}" >> "$GITHUB_ENV"
+
           python3 .github/scripts/parse_model_ops_logs.py \
             --log-dir raw_logs \
             --run-id  "${TRIGGERING_RUN_ID}" \
             --out     "${JSON_FILE}" \
-            --log-out model_ops_log.txt
+            --log-out "${LOG_FILE}"
 
       # -----------------------------------------------------------------
       # Ingest the JSON into ClickHouse (creates the table if absent).
@@ -157,8 +160,8 @@ jobs:
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
-          name: model_ops_log_${{ env.TRIGGERING_RUN_ID }}
-          path: model_ops_log.txt
+          name: model_ops_log_${{ env.TRIGGERING_SHA }}_${{ env.TRIGGERING_RUN_ID }}
+          path: ${{ env.LOG_FILE }}
           retention-days: 10
 
       - name: Upload JSON artifact
@@ -200,3 +203,4 @@ jobs:
             echo "| Error               | ${ERROR} |"
             echo "| Unknown             | ${UNKNOWN} |"
           } >> "$GITHUB_STEP_SUMMARY"
+
