@@ -5,7 +5,7 @@ name: push-model-ops-logs-to-clickhouse
 on:
   workflow_run:
     workflows:
-      - model-ops-tests
+      - model-ops-tests-nightly
     types: [completed]
   workflow_dispatch:
     inputs:
@@ -202,5 +202,4 @@ jobs:
             echo "| Failed              | ${FAILED} |"
             echo "| Error               | ${ERROR} |"
             echo "| Unknown             | ${UNKNOWN} |"
-          } >> "$GITHUB_STEP_SUMMARY"
-
+          } | tee -a "$GITHUB_STEP_SUMMARY"

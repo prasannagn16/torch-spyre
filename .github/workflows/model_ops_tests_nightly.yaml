@@ -1,4 +1,4 @@
-name: model-ops-tests
+name: model-ops-tests-nightly
 
 on:
   # Run automatically on every merge to main
@@ -8,6 +8,9 @@ on:
       - tests/docs/**
       - docs/**
       - README.md
+  # Run on a schedule (nightly at 2 AM UTC)
+  schedule:
+    - cron: 0 2 * * *
   # Removing from CICD till the ops tests get matured
   # pull_request:
   #   branches: [main]
@@ -25,6 +28,7 @@ defaults:
 permissions:
   contents: read
   checks: write
+  actions: read    # needed by push-model-ops-logs-to-clickhouse to fetch job logs
 
 jobs:
   model-ops-tests:
@@ -49,7 +53,7 @@ jobs:
     #     config: <filename inside tests/configs/model_ops_tests/>
     #
     # The JUnit XML report is automatically named after the config file, e.g.:
-    #   granite_4.0_h_tiny_spyre.yaml  ->  granite_4.0_h_tiny_spyre.xml
+    #   granite-4.1-8b_spyre.yaml  ->  granite-4.1-8b_spyre.xml
     # ---------------------------------------------------------------------------
     strategy:
       fail-fast: false   # run all suites even if one fails
@@ -146,3 +150,16 @@ jobs:
           path: ${{ env.REPORT_PATH }}
           if-no-files-found: warn   # warn (not fail) if pytest itself crashed
           retention-days: 10
+      # ---------------------------------------------------------------------------
+      # Write a brief summary to the job UI page.
+      # ---------------------------------------------------------------------------
+      - name: Annotate job with suite metadata
+        if: always()
+        run: |
+          {
+            echo "### Model-ops suite: ${{ matrix.suite.name }}"
+            echo "| Key | Value |"
+            echo "|---|---|"
+            echo "| Config | \`${{ matrix.suite.config }}\` |"
+            echo "| Report | \`${{ env.REPORT_NAME }}\` |"
+          } | tee -a "$GITHUB_STEP_SUMMARY"
