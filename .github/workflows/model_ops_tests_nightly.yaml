@@ -1,21 +1,9 @@
 name: model-ops-tests-nightly
 
 on:
-  # Run automatically on every merge to main
-  push:
-    branches: [main]
-    paths-ignore:
-      - tests/docs/**
-      - docs/**
-      - README.md
   # Run on a schedule (nightly at 2 AM UTC)
   schedule:
     - cron: 0 2 * * *
-  # Removing from CICD till the ops tests get matured
-  # pull_request:
-  #   branches: [main]
-  # merge_group:
-  #   types: [checks_requested]
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}

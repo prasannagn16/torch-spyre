@@ -156,7 +156,7 @@ jobs:
       # Upload both artefacts so you can inspect them without re-running.
       # if: always() ensures upload even when the ingest step fails.
       # -----------------------------------------------------------------
-      - name: Upload model_ops_log.txt artifact
+      - name: Upload Logs artifact
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
